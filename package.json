@@ -1,6 +1,6 @@
 {
   "name": "@pulso/api",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "main": "src/server.js",
@@ -13,8 +13,9 @@
     "test": "node --test tests/*.test.mjs"
   },
   "dependencies": {
-    "cors": "^2.8.5",
-    "express": "^5.1.0",
-    "helmet": "^8.1.0"
+    "cors": "2.8.6",
+    "express": "5.2.1",
+    "helmet": "8.3.0",
+    "stripe": "22.3.2"
   }
 }
