@@ -1,0 +1,20 @@
+function parseBoolean(value) {
+  return String(value).trim().toLowerCase() === "true";
+}
+
+function parsePort(value) {
+  const port = Number(value ?? 3000);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+    throw new Error("PORT must be a valid TCP port.");
+  }
+  return port;
+}
+
+export function getEnvironment(source = process.env) {
+  return Object.freeze({
+    host: source.HOST?.trim() || "0.0.0.0",
+    port: parsePort(source.PORT),
+    publicOrigin: source.PUBLIC_ORIGIN?.trim() || "https://pulso.cyara.com.br",
+    checkoutEnabled: parseBoolean(source.CHECKOUT_ENABLED ?? "false"),
+  });
+}
