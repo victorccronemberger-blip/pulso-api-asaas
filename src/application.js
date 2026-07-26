@@ -2,16 +2,17 @@ import cors from "cors";
 import express from "express";
 import helmet from "helmet";
 import { getEnvironment } from "./config/environment.js";
-import { createStripeClient } from "./integrations/stripe/client.js";
+import { createAppmaxClient } from "./integrations/appmax/client.js";
+import {
+  createAppmaxValidationHandler,
+  createAppmaxWebhookHandler,
+} from "./routes/appmax-integration.js";
 import { createCheckoutRouter } from "./routes/checkout.js";
 import { createHealthRouter } from "./routes/health.js";
-import { createStripeWebhookHandler } from "./routes/stripe-webhook.js";
-import { handleStripeEvent } from "./services/stripe-events.js";
 
 export function createApp(overrides = {}, dependencies = {}) {
   const environment = getEnvironment({ ...process.env, ...overrides });
-  const stripeClient = dependencies.stripeClient ?? createStripeClient(environment);
-  const onStripeEvent = dependencies.onStripeEvent ?? handleStripeEvent;
+  const appmaxClient = dependencies.appmaxClient ?? createAppmaxClient(environment);
   const app = express();
 
   app.disable("x-powered-by");
@@ -23,15 +24,18 @@ export function createApp(overrides = {}, dependencies = {}) {
     allowedHeaders: ["Content-Type", "Accept", "Idempotency-Key"],
     maxAge: 86_400,
   }));
-  app.post(
-    "/v1/webhooks/stripe",
-    express.raw({ type: "application/json", limit: "256kb" }),
-    createStripeWebhookHandler({ environment, stripeClient, onStripeEvent }),
-  );
   app.use(express.json({ limit: "32kb" }));
 
   app.use("/health", createHealthRouter(express, environment));
-  app.use("/v1/checkout", createCheckoutRouter(express, { environment, stripeClient }));
+  app.post(
+    "/v1/integrations/appmax/validate",
+    createAppmaxValidationHandler({ environment }),
+  );
+  app.post(
+    "/v1/webhooks/appmax",
+    createAppmaxWebhookHandler({ environment, appmaxClient }),
+  );
+  app.use("/v1/checkout", createCheckoutRouter(express, { environment, appmaxClient }));
 
   app.use((_request, response) => {
     response.status(404).json({
@@ -40,5 +44,5 @@ export function createApp(overrides = {}, dependencies = {}) {
     });
   });
 
-  return { app, environment, stripeClient };
+  return { app, environment, appmaxClient };
 }

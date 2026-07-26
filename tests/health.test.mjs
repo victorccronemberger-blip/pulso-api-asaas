@@ -2,6 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createApp } from "../src/application.js";
 
+const enabledEnvironment = {
+  APPMAX_ENABLED: "true",
+  APPMAX_ENVIRONMENT: "sandbox",
+  APPMAX_MERCHANT_CLIENT_ID: "merchant-client-id",
+  APPMAX_MERCHANT_CLIENT_SECRET: "merchant-client-secret",
+  APPMAX_EXTERNAL_ID: "8623e65e-2ddf-4ec0-87f0-aff3bc26a6aa",
+};
+
 async function serve(context, overrides = {}, dependencies = {}) {
   const { app } = createApp({
     PORT: "3100",
@@ -16,8 +24,26 @@ async function serve(context, overrides = {}, dependencies = {}) {
   return `http://127.0.0.1:${address.port}`;
 }
 
-test("reports a healthy API while keeping checkout disabled without a Stripe key", async (context) => {
-  const origin = await serve(context, { CHECKOUT_ENABLED: "true" });
+function buyer() {
+  return {
+    firstName: "Victor",
+    lastName: "Cronemberger",
+    email: "victor@example.com",
+    phone: "11999999999",
+    documentNumber: "19100000000",
+    ip: "127.0.0.1",
+  };
+}
+
+function requestHeaders() {
+  return {
+    "content-type": "application/json",
+    "idempotency-key": crypto.randomUUID(),
+  };
+}
+
+test("reports a healthy API while keeping checkout disabled without Appmax merchant credentials", async (context) => {
+  const origin = await serve(context, { APPMAX_ENABLED: "true" });
   const response = await fetch(`${origin}/health`, {
     headers: { origin: "https://pulso.cyara.com.br" },
   });
@@ -31,154 +57,269 @@ test("reports a healthy API while keeping checkout disabled without a Stripe key
 
   const status = await fetch(`${origin}/v1/checkout/status`);
   assert.equal(status.status, 200);
-  assert.deepEqual(await status.json(), { enabled: false });
+  assert.deepEqual(await status.json(), {
+    enabled: false,
+    provider: "appmax",
+    environment: "sandbox",
+    externalId: null,
+    methods: [],
+  });
 });
 
-test("rejects checkout creation while the payment capability is disabled", async (context) => {
-  const origin = await serve(context, { CHECKOUT_ENABLED: "false" });
-  const response = await fetch(`${origin}/v1/checkout/sessions`, {
+test("rejects checkout creation while Appmax is disabled", async (context) => {
+  const origin = await serve(context, { APPMAX_ENABLED: "false" });
+  const response = await fetch(`${origin}/v1/checkout/orders`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ slugs: ["novo-cpa"], couponCode: "PULSO35" }),
+    headers: requestHeaders(),
+    body: JSON.stringify({
+      slugs: ["novo-cpa"],
+      couponCode: "PULSO35",
+      buyer: buyer(),
+      payment: { method: "pix" },
+    }),
   });
   assert.equal(response.status, 503);
   assert.equal((await response.json()).error, "checkout_unavailable");
 });
 
-test("creates a hosted Stripe Checkout session from server-authoritative prices", async (context) => {
+test("creates a Pix payment from server-authoritative prices", async (context) => {
   const calls = [];
-  const stripeClient = {
-    checkout: {
-      sessions: {
-        create: async (...args) => {
-          calls.push(args);
-          return { id: "cs_test_created", url: "https://checkout.stripe.com/c/pay/cs_test_created" };
+  const appmaxClient = {
+    createCustomer: async (payload) => {
+      calls.push(["customer", payload]);
+      return { data: { customer: { id: 407 } } };
+    },
+    createOrder: async (payload) => {
+      calls.push(["order", payload]);
+      return { data: { order: { id: 6001, status: "pendente" } } };
+    },
+    createPixPayment: async (payload) => {
+      calls.push(["pix", payload]);
+      return {
+        data: {
+          order: { id: 6001, status: "pendente" },
+          payment: { pix_qrcode: "aW1hZ2U=", pix_emv: "000201PULSO" },
         },
-        retrieve: async () => ({ id: "cs_test_paid", payment_status: "paid", status: "complete" }),
-      },
+      };
     },
-    webhooks: { constructEvent() {} },
+    getInstallments: async () => assert.fail("Pix must not calculate installments"),
   };
-  const origin = await serve(context, {
-    CHECKOUT_ENABLED: "true",
-    STRIPE_SECRET_KEY: "sk_test_placeholder",
-  }, { stripeClient });
-
-  const response = await fetch(`${origin}/v1/checkout/sessions`, {
+  const origin = await serve(context, enabledEnvironment, { appmaxClient });
+  const response = await fetch(`${origin}/v1/checkout/orders`, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "idempotency-key": "12345678-1234-4234-8234-123456789012",
-    },
+    headers: requestHeaders(),
     body: JSON.stringify({
       slugs: ["novo-cpa", "simulados-ancord-2026"],
       couponCode: "pulso35",
       clientTotalCents: 1,
+      buyer: buyer(),
+      payment: { method: "pix" },
     }),
   });
   assert.equal(response.status, 201);
   assert.deepEqual(await response.json(), {
-    url: "https://checkout.stripe.com/c/pay/cs_test_created",
+    orderId: 6001,
+    status: "open",
+    method: "pix",
+    totalCents: 125_255,
+    pix: { qrCodeBase64: "aW1hZ2U=", emv: "000201PULSO" },
   });
-  assert.equal(calls.length, 1);
-
-  const [session, requestOptions] = calls[0];
-  assert.equal(session.mode, "payment");
-  assert.equal(session.ui_mode, "hosted");
-  assert.equal(session.line_items[0].price_data.unit_amount, 97_305);
-  assert.equal(session.line_items[1].price_data.unit_amount, 27_950);
-  assert.equal(session.metadata.subtotal_cents, "192700");
-  assert.equal(session.metadata.discount_cents, "67445");
-  assert.equal(session.metadata.total_cents, "125255");
-  assert.equal(session.metadata.coupon_code, "PULSO35");
-  assert.equal(requestOptions.idempotencyKey, "pulso:12345678-1234-4234-8234-123456789012");
+  assert.equal(calls[1][0], "order");
+  assert.equal(calls[1][1].products[0].unit_value, 97_305);
+  assert.equal(calls[1][1].products[1].unit_value, 27_950);
+  assert.equal(calls[2][1].payment_data.pix.document_number, "19100000000");
 });
 
-test("rejects products and coupons that are not in the server catalog", async (context) => {
-  const stripeClient = {
-    checkout: { sessions: { create: async () => assert.fail("Stripe must not be called") } },
-    webhooks: { constructEvent() {} },
+test("tokenized card checkout applies Appmax installment totals without receiving raw card data", async (context) => {
+  const calls = [];
+  const appmaxClient = {
+    getInstallments: async (payload) => {
+      calls.push(["installments", payload]);
+      return {
+        data: {
+          installments: {
+            1: { total: 97_305 },
+            2: { total: 99_251 },
+            3: { total: 101_218 },
+          },
+          settings: { modality: "PP", max_installments: 12, min_installment_value: 500 },
+        },
+      };
+    },
+    createCustomer: async (payload) => {
+      calls.push(["customer", payload]);
+      return { data: { customer: { id: 407 } } };
+    },
+    createOrder: async (payload) => {
+      calls.push(["order", payload]);
+      return { data: { order: { id: 6002, status: "pendente" } } };
+    },
+    createCardPayment: async (payload) => {
+      calls.push(["card", payload]);
+      return { data: { order: { id: 6002, status: "autorizado" }, payment: { installments: 3 } } };
+    },
   };
-  const origin = await serve(context, {
-    CHECKOUT_ENABLED: "true",
-    STRIPE_SECRET_KEY: "sk_test_placeholder",
-  }, { stripeClient });
+  const origin = await serve(context, enabledEnvironment, { appmaxClient });
+  const response = await fetch(`${origin}/v1/checkout/orders`, {
+    method: "POST",
+    headers: requestHeaders(),
+    body: JSON.stringify({
+      slugs: ["novo-cpa"],
+      couponCode: "PULSO35",
+      buyer: buyer(),
+      payment: {
+        method: "credit_card",
+        token: "422146c7523a46119d6073ea56193913",
+        holderName: "Victor Cronemberger",
+        installments: 3,
+      },
+    }),
+  });
+  assert.equal(response.status, 201);
+  assert.deepEqual(await response.json(), {
+    orderId: 6002,
+    status: "processing",
+    method: "credit_card",
+    installments: 3,
+    totalCents: 101_218,
+  });
+  const order = calls.find(([name]) => name === "order")[1];
+  assert.equal(order.products_value, 101_218);
+  assert.equal("unit_value" in order.products[0], false);
+  const card = calls.find(([name]) => name === "card")[1];
+  assert.equal(card.payment_data.credit_card.token, "422146c7523a46119d6073ea56193913");
+  assert.equal(card.payment_data.credit_card.installments, 3);
+  assert.equal(JSON.stringify(card).includes("number"), true);
+  assert.equal(JSON.stringify(card).includes("cvv"), false);
+});
+
+test("returns sanitized Appmax installment options", async (context) => {
+  const appmaxClient = {
+    getInstallments: async () => ({
+      data: {
+        installments: {
+          1: { total: 97_305 },
+          2: { total: 99_251 },
+          3: { total: 101_218 },
+        },
+        settings: { max_installments: 3, min_installment_value: 500 },
+      },
+    }),
+  };
+  const origin = await serve(context, enabledEnvironment, { appmaxClient });
+  const response = await fetch(`${origin}/v1/checkout/installments`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ slugs: ["novo-cpa"], couponCode: "PULSO35" }),
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    baseTotalCents: 97_305,
+    installments: [
+      { number: 1, totalCents: 97_305, installmentCents: 97_305 },
+      { number: 2, totalCents: 99_251, installmentCents: 49_626 },
+      { number: 3, totalCents: 101_218, installmentCents: 33_740 },
+    ],
+  });
+});
+
+test("rejects products, coupons and raw card payloads outside the server contract", async (context) => {
+  const appmaxClient = {
+    createCustomer: async () => assert.fail("Appmax must not be called"),
+    getInstallments: async () => assert.fail("Appmax must not be called"),
+  };
+  const origin = await serve(context, enabledEnvironment, { appmaxClient });
 
   for (const payload of [
-    { slugs: ["produto-inventado"], couponCode: null },
-    { slugs: ["novo-cpa"], couponCode: "DESCONTO100" },
+    { slugs: ["produto-inventado"], couponCode: null, buyer: buyer(), payment: { method: "pix" } },
+    { slugs: ["novo-cpa"], couponCode: "DESCONTO100", buyer: buyer(), payment: { method: "pix" } },
+    {
+      slugs: ["novo-cpa"],
+      couponCode: null,
+      buyer: buyer(),
+      payment: {
+        method: "credit_card",
+        number: "4000000000000010",
+        cvv: "123",
+        holderName: "Victor",
+        installments: 1,
+      },
+    },
   ]) {
-    const response = await fetch(`${origin}/v1/checkout/sessions`, {
+    const response = await fetch(`${origin}/v1/checkout/orders`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: requestHeaders(),
       body: JSON.stringify(payload),
     });
     assert.equal(response.status, 400);
   }
 });
 
-test("verifies the raw Stripe webhook signature before processing an event", async (context) => {
-  const events = [];
-  let receivedBody;
-  const stripeClient = {
-    checkout: { sessions: {} },
-    webhooks: {
-      constructEvent(body, signature, secret) {
-        receivedBody = body;
-        assert.equal(signature, "signed");
-        assert.equal(secret, "whsec_placeholder");
-        return {
-          id: "evt_test_1",
-          type: "checkout.session.completed",
-          data: { object: { id: "cs_test_1", payment_status: "paid" } },
-        };
-      },
+test("validates private Appmax installation without exposing merchant credentials", async (context) => {
+  const origin = await serve(context, {
+    ...enabledEnvironment,
+    APPMAX_APP_NUMERICAL_ID: "1234",
+  }, { appmaxClient: {} });
+  const response = await fetch(`${origin}/v1/integrations/appmax/validate`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ app_id: 1234 }),
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    external_id: "8623e65e-2ddf-4ec0-87f0-aff3bc26a6aa",
+    alias: "PULSO Bancário",
+  });
+
+  const wrongApp = await fetch(`${origin}/v1/integrations/appmax/validate`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ app_id: 9999 }),
+  });
+  assert.equal(wrongApp.status, 403);
+});
+
+test("acknowledges Appmax webhooks quickly and verifies order state through the API", async (context) => {
+  const verified = [];
+  const appmaxClient = {
+    getOrder: async (orderId) => {
+      verified.push(orderId);
+      return { data: { order: { id: orderId, status: "aprovado" } } };
     },
   };
   const origin = await serve(context, {
-    CHECKOUT_ENABLED: "true",
-    STRIPE_SECRET_KEY: "sk_test_placeholder",
-    STRIPE_WEBHOOK_SECRET: "whsec_placeholder",
-  }, {
-    stripeClient,
-    onStripeEvent: async (event) => events.push(event),
-  });
-
-  const response = await fetch(`${origin}/v1/webhooks/stripe`, {
+    ...enabledEnvironment,
+    APPMAX_APP_NUMERICAL_ID: "1234",
+  }, { appmaxClient });
+  const response = await fetch(`${origin}/v1/webhooks/appmax`, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "stripe-signature": "signed",
-    },
-    body: JSON.stringify({ id: "evt_test_1" }),
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      app_id: 1234,
+      event: "order_paid",
+      data: { order_id: 6001 },
+    }),
   });
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { received: true });
-  assert.ok(Buffer.isBuffer(receivedBody));
-  assert.equal(events.length, 1);
-  assert.equal(events[0].id, "evt_test_1");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(verified, [6001]);
 });
 
-test("returns only a sanitized payment status to the storefront", async (context) => {
-  const stripeClient = {
-    checkout: {
-      sessions: {
-        retrieve: async (sessionId) => ({
-          id: sessionId,
-          payment_status: "paid",
-          status: "complete",
-          customer_details: { email: "private@example.com" },
-        }),
+test("returns only a sanitized order status to the storefront", async (context) => {
+  const appmaxClient = {
+    getOrder: async (orderId) => ({
+      data: {
+        order: {
+          id: Number(orderId),
+          status: "aprovado",
+          customer: { email: "private@example.com", document_number: "19100000000" },
+        },
       },
-    },
-    webhooks: { constructEvent() {} },
+    }),
   };
-  const origin = await serve(context, {
-    CHECKOUT_ENABLED: "false",
-    STRIPE_SECRET_KEY: "sk_test_placeholder",
-  }, { stripeClient });
-
-  const response = await fetch(`${origin}/v1/checkout/sessions/cs_test_123`);
+  const origin = await serve(context, enabledEnvironment, { appmaxClient });
+  const response = await fetch(`${origin}/v1/checkout/orders/6001`);
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { id: "cs_test_123", status: "paid" });
+  assert.deepEqual(await response.json(), { id: 6001, status: "paid" });
 });
