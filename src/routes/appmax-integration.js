@@ -21,7 +21,7 @@ export function createAppmaxValidationHandler({ environment }) {
   };
 }
 
-export function createAppmaxWebhookHandler({ environment, appmaxClient }) {
+export function createAppmaxWebhookHandler({ environment, appmaxClient, store }) {
   return function appmaxWebhook(request, response) {
     const appId = validAppId(request.body?.app_id);
     const event = String(request.body?.event ?? request.body?.event_type ?? "").trim();
@@ -44,7 +44,15 @@ export function createAppmaxWebhookHandler({ environment, appmaxClient }) {
 
     if (orderId && appmaxClient) {
       void appmaxClient.getOrder(orderId)
-        .then((result) => {
+        .then(async (result) => {
+          const status = String(result?.data?.order?.status ?? "unknown").toLowerCase();
+          const mapped = ["aprovado", "integrado", "pendente_integracao", "pendente_integracao_em_analise"].includes(status) ? "paid"
+            : status === "pendente" ? "open" : status === "estornado" ? "refunded" : ["cancelado", "recusado_por_risco"].includes(status) ? "failed" : "processing";
+          await store?.updateOrderFromWebhook({
+            appmaxOrderId: orderId,
+            status: mapped,
+            eventId: `${event}:${orderId}:${status}`,
+          });
           console.info("Verified Appmax webhook", {
             appId,
             event,

@@ -19,6 +19,12 @@ function parseOptionalInteger(value) {
   return parsed;
 }
 
+function parsePositiveInteger(value, fallback, name) {
+  const parsed = value === undefined || value === null || value === "" ? fallback : Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error(`${name} must be a positive integer.`);
+  return parsed;
+}
+
 function parseEnvironment(value) {
   const environment = String(value ?? "sandbox").trim().toLowerCase();
   if (!["sandbox", "production"].includes(environment)) {
@@ -44,6 +50,13 @@ export function getEnvironment(source = process.env) {
     host: source.HOST?.trim() || "0.0.0.0",
     port: parsePort(source.PORT),
     publicOrigin: source.PUBLIC_ORIGIN?.trim() || "https://pulso.cyara.com.br",
+    adminOrigin: source.ADMIN_ORIGIN?.trim() || source.PUBLIC_ORIGIN?.trim() || "https://pulso.cyara.com.br",
+    sitesOrigin: source.SITES_ORIGIN?.trim() || "https://pulso-bancario.victor-cronemberger.chatgpt.site",
+    mysqlUrl: source.MYSQL_URL?.trim() || null,
+    adminBootstrapToken: source.ADMIN_BOOTSTRAP_TOKEN?.trim() || null,
+    sessionPepper: source.SESSION_PEPPER?.trim() || null,
+    sessionTtlSeconds: parsePositiveInteger(source.ADMIN_SESSION_TTL_SECONDS, 28_800, "ADMIN_SESSION_TTL_SECONDS"),
+    appmaxWebhookSecret: source.APPMAX_WEBHOOK_SECRET?.trim() || null,
     appmaxEnvironment,
     appmaxAuthOrigin: appmaxEnvironment === "production"
       ? "https://auth.appmax.com.br"

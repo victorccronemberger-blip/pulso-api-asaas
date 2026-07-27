@@ -52,6 +52,7 @@ test("reports a healthy API while keeping checkout disabled without Appmax merch
   assert.deepEqual(await response.json(), {
     status: "ok",
     service: "pulso-api",
+    database: { status: "ready", error: null },
     capabilities: { checkout: false },
   });
 

@@ -1,0 +1,102 @@
+import mysql from "mysql2/promise";
+
+const asJson = (value) => JSON.stringify(value ?? []);
+const fromJson = (value, fallback = []) => {
+  if (value && typeof value === "object") return value;
+  try { return value ? JSON.parse(value) : fallback; } catch { return fallback; }
+};
+const iso = (value) => value ? new Date(value).toISOString() : null;
+const coupon = (row) => row && ({ id: row.id, code: row.code, discountBps: row.discount_bps, active: Boolean(row.active), startsAt: iso(row.starts_at), endsAt: iso(row.ends_at), maxRedemptions: row.max_redemptions, productSlugs: fromJson(row.product_scope_json), redemptions: Number(row.redemptions ?? 0), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) });
+
+export function createMySqlStore(databaseUrl) {
+  const pool = mysql.createPool({ uri: databaseUrl, timezone: "Z", dateStrings: true });
+  let ready;
+  async function ensureSchema() {
+    if (ready) return ready;
+    ready = (async () => {
+      const statements = [
+        `CREATE TABLE IF NOT EXISTS administrators (id CHAR(36) PRIMARY KEY, email VARCHAR(160) NOT NULL UNIQUE, password_salt VARCHAR(64) NOT NULL, password_hash VARCHAR(128) NOT NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3))`,
+        `CREATE TABLE IF NOT EXISTS admin_sessions (id CHAR(36) PRIMARY KEY, admin_id CHAR(36) NOT NULL, token_hash CHAR(64) NOT NULL UNIQUE, csrf_hash CHAR(64) NOT NULL, expires_at DATETIME(3) NOT NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), INDEX admin_sessions_expiry (expires_at), CONSTRAINT admin_sessions_admin_fk FOREIGN KEY (admin_id) REFERENCES administrators(id) ON DELETE CASCADE)`,
+        `CREATE TABLE IF NOT EXISTS coupons (id CHAR(36) PRIMARY KEY, code VARCHAR(32) NOT NULL UNIQUE, discount_bps SMALLINT UNSIGNED NOT NULL, active TINYINT(1) NOT NULL DEFAULT 1, starts_at DATETIME(3) NULL, ends_at DATETIME(3) NULL, max_redemptions INT UNSIGNED NULL, product_scope_json JSON NOT NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3), INDEX coupons_active (active, starts_at, ends_at))`,
+        `CREATE TABLE IF NOT EXISTS orders (id CHAR(36) PRIMARY KEY, appmax_order_id BIGINT UNSIGNED NOT NULL UNIQUE, status VARCHAR(32) NOT NULL, buyer_email VARCHAR(160) NULL, subtotal_cents INT UNSIGNED NOT NULL, discount_cents INT UNSIGNED NOT NULL, total_cents INT UNSIGNED NOT NULL, coupon_code VARCHAR(32) NULL, coupon_redeemed TINYINT(1) NOT NULL DEFAULT 0, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3), INDEX orders_status_updated (status, updated_at))`,
+        `CREATE TABLE IF NOT EXISTS order_items (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, order_id CHAR(36) NOT NULL, course_slug VARCHAR(80) NOT NULL, title VARCHAR(180) NOT NULL, base_price_cents INT UNSIGNED NOT NULL, discount_cents INT UNSIGNED NOT NULL, final_price_cents INT UNSIGNED NOT NULL, CONSTRAINT order_items_order_fk FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE)`,
+        `CREATE TABLE IF NOT EXISTS coupon_redemptions (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, coupon_code VARCHAR(32) NOT NULL, order_id CHAR(36) NOT NULL UNIQUE, redeemed_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), INDEX coupon_redemptions_code (coupon_code))`,
+        `CREATE TABLE IF NOT EXISTS webhook_events (event_id VARCHAR(128) PRIMARY KEY, received_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3))`,
+        `CREATE TABLE IF NOT EXISTS admin_audit_log (id CHAR(36) PRIMARY KEY, admin_id CHAR(36) NULL, action VARCHAR(80) NOT NULL, entity_type VARCHAR(80) NOT NULL, entity_id VARCHAR(80) NULL, metadata_json JSON NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), INDEX audit_created (created_at))`,
+        `CREATE TABLE IF NOT EXISTS app_settings (setting_key VARCHAR(64) PRIMARY KEY, setting_value JSON NOT NULL, updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3))`,
+      ];
+      for (const sql of statements) await pool.query(sql);
+      await pool.query(`INSERT IGNORE INTO coupons (id, code, discount_bps, active, product_scope_json) VALUES (UUID(), 'PULSO35', 3500, 1, JSON_ARRAY())`);
+      await pool.query(`INSERT IGNORE INTO app_settings (setting_key, setting_value) VALUES ('campaign', JSON_OBJECT('activeCouponCode', 'PULSO35', 'headline', NULL))`);
+    })();
+    return ready;
+  }
+  const id = () => crypto.randomUUID();
+  return {
+    ensureSchema, async close() { await pool.end(); },
+    async countAdmins() { await ensureSchema(); const [[row]] = await pool.query("SELECT COUNT(*) AS total FROM administrators"); return Number(row.total); },
+    async getAdminByEmail(email) { await ensureSchema(); const [[row]] = await pool.query("SELECT id, email, password_salt AS passwordSalt, password_hash AS passwordHash FROM administrators WHERE email = ?", [email]); return row ?? null; },
+    async createAdmin(admin) { await ensureSchema(); const value = { id: id(), ...admin }; await pool.query("INSERT INTO administrators (id,email,password_salt,password_hash) VALUES (?,?,?,?)", [value.id,value.email,value.passwordSalt,value.passwordHash]); return value; },
+    async createSession(session) { await ensureSchema(); await pool.query("INSERT INTO admin_sessions (id,admin_id,token_hash,csrf_hash,expires_at) VALUES (?,?,?,?,?)", [id(),session.adminId,session.tokenHash,session.csrfHash,new Date(session.expiresAt)]); },
+    async getSession(tokenHash) { await ensureSchema(); const [[row]] = await pool.query("SELECT s.id,s.admin_id AS adminId,s.csrf_hash AS csrfHash,s.expires_at AS expiresAt,a.email FROM admin_sessions s JOIN administrators a ON a.id=s.admin_id WHERE s.token_hash=? AND s.expires_at > NOW(3)", [tokenHash]); return row ? { ...row, expiresAt: +new Date(row.expiresAt), admin: { id: row.adminId, email: row.email } } : null; },
+    async revokeSession(tokenHash) { await ensureSchema(); await pool.query("DELETE FROM admin_sessions WHERE token_hash=?", [tokenHash]); },
+    async listCoupons() { await ensureSchema(); const [rows] = await pool.query("SELECT c.*, (SELECT COUNT(*) FROM coupon_redemptions r WHERE r.coupon_code=c.code) redemptions FROM coupons c ORDER BY c.code"); return rows.map(coupon); },
+    async getCoupon(code) { await ensureSchema(); const [[row]] = await pool.query("SELECT c.*, (SELECT COUNT(*) FROM coupon_redemptions r WHERE r.coupon_code=c.code) redemptions FROM coupons c WHERE code=?", [code]); return coupon(row); },
+    async saveCoupon(value) { await ensureSchema(); const existing = await this.getCoupon(value.code); const next = { id: existing?.id ?? id(), ...value }; await pool.query("INSERT INTO coupons (id,code,discount_bps,active,starts_at,ends_at,max_redemptions,product_scope_json) VALUES (?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE discount_bps=VALUES(discount_bps),active=VALUES(active),starts_at=VALUES(starts_at),ends_at=VALUES(ends_at),max_redemptions=VALUES(max_redemptions),product_scope_json=VALUES(product_scope_json)", [next.id,next.code,next.discountBps,next.active?1:0,next.startsAt,next.endsAt,next.maxRedemptions,asJson(next.productSlugs)]); return this.getCoupon(next.code); },
+    async archiveCoupon(code) { await ensureSchema(); const [result] = await pool.query("UPDATE coupons SET active=0 WHERE code=?", [code]); if (result.affectedRows) { const current = await this.getCampaign(); if (current.activeCouponCode === code) await this.saveCampaign({ activeCouponCode: null }); } return Boolean(result.affectedRows); },
+    async getEligibleCoupon(code, slugs) { const c = await this.getCoupon(code); if (!c || !c.active || (c.startsAt && +new Date(c.startsAt)>Date.now()) || (c.endsAt && +new Date(c.endsAt)<=Date.now()) || (c.maxRedemptions!==null && c.redemptions>=c.maxRedemptions) || (c.productSlugs.length && !slugs.every((slug)=>c.productSlugs.includes(slug)))) return null; return c; },
+    async createOrder(order) { await ensureSchema(); const orderId=id(); await pool.query("INSERT INTO orders (id,appmax_order_id,status,buyer_email,subtotal_cents,discount_cents,total_cents,coupon_code) VALUES (?,?,?,?,?,?,?,?)", [orderId,order.appmaxOrderId,order.status,order.buyerEmail,order.subtotalCents,order.discountCents,order.totalCents,order.couponCode]); for (const line of order.lines) await pool.query("INSERT INTO order_items (order_id,course_slug,title,base_price_cents,discount_cents,final_price_cents) VALUES (?,?,?,?,?,?)", [orderId,line.product.slug,line.product.title,line.basePriceCents,line.discountCents,line.finalPriceCents]); return { id:orderId, ...order }; },
+    async updateOrderFromWebhook({ appmaxOrderId,status,eventId }) { await ensureSchema(); const connection=await pool.getConnection(); try { await connection.beginTransaction(); if(eventId){const [seen]=await connection.query("SELECT event_id FROM webhook_events WHERE event_id=?",[eventId]); if(seen.length){await connection.rollback();return {duplicate:true};} await connection.query("INSERT INTO webhook_events (event_id) VALUES (?)",[eventId]);} const [[order]]=await connection.query("SELECT * FROM orders WHERE appmax_order_id=? FOR UPDATE",[appmaxOrderId]); if(!order){await connection.commit();return {missing:true};} await connection.query("UPDATE orders SET status=? WHERE id=?",[status,order.id]); if(status==='paid'&&!order.coupon_redeemed&&order.coupon_code){const [[c]]=await connection.query("SELECT max_redemptions FROM coupons WHERE code=? FOR UPDATE",[order.coupon_code]); const [[count]]=await connection.query("SELECT COUNT(*) total FROM coupon_redemptions WHERE coupon_code=?",[order.coupon_code]); if(c&&(c.max_redemptions===null||Number(count.total)<Number(c.max_redemptions))){await connection.query("INSERT IGNORE INTO coupon_redemptions (coupon_code,order_id) VALUES (?,?)",[order.coupon_code,order.id]);await connection.query("UPDATE orders SET coupon_redeemed=1 WHERE id=?",[order.id]);}} await connection.commit();return {id:order.id,status};}catch(e){await connection.rollback();throw e;}finally{connection.release();} },
+    async getCampaign() { await ensureSchema(); const [[row]]=await pool.query("SELECT setting_value FROM app_settings WHERE setting_key='campaign'"); return fromJson(row?.setting_value, {activeCouponCode:null,headline:null}); },
+    async saveCampaign(value) { await ensureSchema(); const next={...(await this.getCampaign()),...value}; await pool.query("INSERT INTO app_settings (setting_key,setting_value) VALUES ('campaign',?) ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)",[asJson(next)]); return next; },
+    async audit(entry) { await ensureSchema(); await pool.query("INSERT INTO admin_audit_log (id,admin_id,action,entity_type,entity_id,metadata_json) VALUES (?,?,?,?,?,?)",[id(),entry.adminId??null,entry.action,entry.entityType,entry.entityId??null,JSON.stringify(entry.metadata??{})]); },
+    async overview() {
+      await ensureSchema();
+      const [[row]]=await pool.query(`SELECT
+        COUNT(*) orders,
+        COALESCE(SUM(status='paid'),0) paidOrders,
+        COALESCE(SUM(status IN ('created','open','processing')),0) openOrders,
+        COALESCE(SUM(status IN ('failed','chargeback')),0) failedOrders,
+        COALESCE(SUM(status='refunded'),0) refundedOrders,
+        COALESCE(SUM(CASE WHEN status='paid' THEN subtotal_cents END),0) grossRevenueCents,
+        COALESCE(SUM(CASE WHEN status='paid' THEN discount_cents END),0) discountsCents,
+        COALESCE(SUM(CASE WHEN status='paid' THEN total_cents END),0) paidRevenueCents,
+        COALESCE(AVG(CASE WHEN status='paid' THEN total_cents END),0) averageTicketCents
+        FROM orders`);
+      return Object.fromEntries(Object.entries(row).map(([key,value])=>[key,Number(value)]));
+    },
+    async finance() {
+      await ensureSchema();
+      const [rows]=await pool.query(`SELECT DATE(updated_at) day,COUNT(*) orders,
+        SUM(subtotal_cents) grossCents,SUM(discount_cents) discountCents,SUM(total_cents) totalCents
+        FROM orders WHERE status='paid' GROUP BY DATE(updated_at) ORDER BY day ASC LIMIT 90`);
+      return rows.map((row)=>({
+        day:String(row.day).slice(0,10),
+        orders:Number(row.orders),
+        grossCents:Number(row.grossCents),
+        discountCents:Number(row.discountCents),
+        totalCents:Number(row.totalCents),
+      }));
+    },
+    async listOrders({limit=50,status}={}) {
+      await ensureSchema();
+      const [rows]=await pool.query(`SELECT o.id,o.appmax_order_id AS appmaxOrderId,o.buyer_email AS buyerEmail,
+        o.status,o.subtotal_cents AS subtotalCents,o.discount_cents AS discountCents,
+        o.total_cents AS totalCents,o.coupon_code AS couponCode,
+        (SELECT COUNT(*) FROM order_items i WHERE i.order_id=o.id) items,
+        o.created_at AS createdAt,o.updated_at AS updatedAt
+        FROM orders o ${status?'WHERE o.status=?':''} ORDER BY o.updated_at DESC LIMIT ?`,status?[status,limit]:[limit]);
+      return rows.map((row)=>({
+        ...row,
+        appmaxOrderId:Number(row.appmaxOrderId),
+        subtotalCents:Number(row.subtotalCents),
+        discountCents:Number(row.discountCents),
+        totalCents:Number(row.totalCents),
+        items:Number(row.items),
+        createdAt:iso(row.createdAt),
+        updatedAt:iso(row.updatedAt),
+      }));
+    },
+    async listAudit({limit=100}={}) { await ensureSchema(); const [rows]=await pool.query("SELECT id,admin_id AS adminId,action,entity_type AS entityType,entity_id AS entityId,metadata_json AS metadata,created_at AS createdAt FROM admin_audit_log ORDER BY created_at DESC LIMIT ?",[limit]); return rows.map((r)=>({...r,metadata:fromJson(r.metadata,{}),createdAt:iso(r.createdAt)})); },
+  };
+}

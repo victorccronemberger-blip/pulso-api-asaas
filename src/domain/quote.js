@@ -21,7 +21,7 @@ export class CheckoutValidationError extends Error {
   }
 }
 
-export function createAuthoritativeQuote(input) {
+export function createAuthoritativeQuote(input, options = {}) {
   if (!input || typeof input !== "object" || !Array.isArray(input.slugs)) {
     throw new CheckoutValidationError("Carrinho inválido.", "invalid_cart");
   }
@@ -38,7 +38,9 @@ export function createAuthoritativeQuote(input) {
   }
 
   const normalizedCoupon = normalizeCouponCode(input.couponCode);
-  const coupon = resolveCoupon(normalizedCoupon);
+  // A repository-backed coupon is passed only by server routes. Client input never
+  // controls price or discount metadata.
+  const coupon = Object.hasOwn(options, "coupon") ? options.coupon : resolveCoupon(normalizedCoupon);
   if (normalizedCoupon && !coupon) {
     throw new CheckoutValidationError("Cupom inválido ou indisponível.", "invalid_coupon");
   }

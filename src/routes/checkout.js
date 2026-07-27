@@ -83,11 +83,17 @@ function parsePayment(input) {
   };
 }
 
-function quoteFromBody(body) {
+async function quoteFromBody(body, store) {
+  const slugs = body?.slugs;
+  const couponCode = body?.couponCode;
+  const normalized = typeof couponCode === "string" ? couponCode.trim().toUpperCase().replace(/\s+/g, "") : null;
+  const coupon = normalized && Array.isArray(slugs)
+    ? await store?.getEligibleCoupon(normalized, [...new Set(slugs)])
+    : null;
   return createAuthoritativeQuote({
-    slugs: body?.slugs,
-    couponCode: body?.couponCode,
-  });
+    slugs,
+    couponCode,
+  }, store ? { coupon } : {});
 }
 
 function orderStatus(value) {
@@ -166,7 +172,7 @@ function handleInputError(error, response) {
   return false;
 }
 
-export function createCheckoutRouter(express, { environment, appmaxClient }) {
+export function createCheckoutRouter(express, { environment, appmaxClient, store }) {
   const router = express.Router();
   const limiter = createFixedWindowLimiter();
   const attempts = new Map();
@@ -194,7 +200,7 @@ export function createCheckoutRouter(express, { environment, appmaxClient }) {
     if (!requireProvider(response)) return;
     let quote;
     try {
-      quote = quoteFromBody(request.body);
+      quote = await quoteFromBody(request.body, store);
     } catch (error) {
       if (handleInputError(error, response)) return;
       throw error;
@@ -231,7 +237,7 @@ export function createCheckoutRouter(express, { environment, appmaxClient }) {
     let payment;
     try {
       key = idempotencyKey(request);
-      quote = quoteFromBody(request.body);
+      quote = await quoteFromBody(request.body, store);
       buyer = parseBuyer(request.body?.buyer);
       payment = parsePayment(request.body?.payment);
     } catch (error) {
@@ -312,6 +318,16 @@ export function createCheckoutRouter(express, { environment, appmaxClient }) {
         });
         const order = appmaxOrder(orderResult);
         const orderId = integerId(order?.id, "order id");
+        await store?.createOrder({
+          appmaxOrderId: orderId,
+          status: "created",
+          buyerEmail: buyer.email,
+          couponCode: quote.coupon?.code ?? null,
+          subtotalCents: quote.subtotalCents,
+          discountCents: quote.discountCents,
+          totalCents: chargedTotalCents,
+          lines: quote.lines,
+        });
 
         if (payment.method === "pix") {
           const pixResult = await appmaxClient.createPixPayment({
@@ -322,7 +338,7 @@ export function createCheckoutRouter(express, { environment, appmaxClient }) {
           if (typeof pix?.pix_qrcode !== "string" || typeof pix?.pix_emv !== "string") {
             throw new Error("Appmax returned incomplete Pix instructions.");
           }
-          return {
+          const result = {
             status: 201,
             body: {
               orderId,
@@ -332,6 +348,18 @@ export function createCheckoutRouter(express, { environment, appmaxClient }) {
               pix: { qrCodeBase64: pix.pix_qrcode, emv: pix.pix_emv },
             },
           };
+          try {
+            await store?.updateOrderFromWebhook({
+              appmaxOrderId: orderId,
+              status: result.body.status,
+            });
+          } catch (persistenceError) {
+            console.error("Could not update the local Pix order", {
+              orderId,
+              type: persistenceError?.name,
+            });
+          }
+          return result;
         }
 
         const cardResult = await appmaxClient.createCardPayment({
@@ -347,7 +375,7 @@ export function createCheckoutRouter(express, { environment, appmaxClient }) {
             },
           },
         });
-        return {
+        const result = {
           status: 201,
           body: {
             orderId,
@@ -357,6 +385,18 @@ export function createCheckoutRouter(express, { environment, appmaxClient }) {
             totalCents: chargedTotalCents,
           },
         };
+        try {
+          await store?.updateOrderFromWebhook({
+            appmaxOrderId: orderId,
+            status: result.body.status,
+          });
+        } catch (persistenceError) {
+          console.error("Could not update the local card order", {
+            orderId,
+            type: persistenceError?.name,
+          });
+        }
+        return result;
       } catch (error) {
         console.error("Appmax checkout failed", {
           endpoint: error?.endpoint,
