@@ -22,7 +22,7 @@ export function createAppmaxValidationHandler({ environment }) {
 }
 
 export function createAppmaxWebhookHandler({ environment, appmaxClient, store }) {
-  return function appmaxWebhook(request, response) {
+  return async function appmaxWebhook(request, response) {
     const appId = validAppId(request.body?.app_id);
     const event = String(request.body?.event ?? request.body?.event_type ?? "").trim();
     const orderId = validAppId(
@@ -40,34 +40,21 @@ export function createAppmaxWebhookHandler({ environment, appmaxClient, store })
       return;
     }
 
-    response.json({ received: true });
-
-    if (orderId && appmaxClient) {
-      void appmaxClient.getOrder(orderId)
-        .then(async (result) => {
-          const status = String(result?.data?.order?.status ?? "unknown").toLowerCase();
-          const mapped = ["aprovado", "integrado", "pendente_integracao", "pendente_integracao_em_analise"].includes(status) ? "paid"
-            : status === "pendente" ? "open" : status === "estornado" ? "refunded" : ["cancelado", "recusado_por_risco"].includes(status) ? "failed" : "processing";
-          await store?.updateOrderFromWebhook({
-            appmaxOrderId: orderId,
-            status: mapped,
-            eventId: `${event}:${orderId}:${status}`,
-          });
-          console.info("Verified Appmax webhook", {
-            appId,
-            event,
-            orderId,
-            status: result?.data?.order?.status ?? "unknown",
-          });
-        })
-        .catch((error) => {
-          console.error("Could not verify Appmax webhook", {
-            appId,
-            event,
-            orderId,
-            status: error?.status,
-          });
-        });
+    if (!orderId || !appmaxClient || !store) return response.status(503).json({ error: "webhook_unavailable" });
+    try {
+      const result = await appmaxClient.getOrder(orderId);
+      const status = String(result?.data?.order?.status ?? "unknown").toLowerCase();
+      const mapped = ["aprovado", "integrado", "pendente_integracao", "pendente_integracao_em_analise"].includes(status) ? "paid"
+        : status === "pendente" ? "open" : status === "estornado" ? "refunded"
+          : ["chargeback", "chargeback_em_analise", "chargeback_ganho", "chargeback_perdido"].includes(status) ? "chargeback"
+            : ["cancelado", "recusado_por_risco"].includes(status) ? "failed" : "processing";
+      const persisted = await store.updateOrderFromWebhook({ appmaxOrderId: orderId, status: mapped, eventId: `${event}:${orderId}:${status}` });
+      if (persisted?.missing) throw new Error("Webhook order is not persisted yet.");
+      console.info("Verified Appmax webhook", { appId, event, orderId, status });
+      return response.json({ received: true });
+    } catch (error) {
+      console.error("Could not verify or persist Appmax webhook", { appId, event, orderId, status: error?.status, type: error?.name });
+      return response.status(502).json({ error: "webhook_retry" });
     }
   };
 }

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createApp } from "../src/application.js";
 import { createInMemoryStore } from "../src/admin/in-memory-store.js";
+import { resolveOrderStatus } from "../src/admin/order-status.js";
 
 async function api(context) {
   const store = createInMemoryStore();
@@ -49,9 +50,12 @@ test("quotes only eligible coupons and publishes the campaign without leaking ad
 
 test("persists checkout orders and applies coupon redemption once on an Appmax webhook", async (context) => {
   const { store } = await api(context);
-  await store.createOrder({ appmaxOrderId: 55, status: "open", buyerEmail: "buyer@example.test", couponCode: "PULSO35", subtotalCents: 1000, discountCents: 350, totalCents: 650, lines: [] });
+  const attemptKey = "a0000000-0000-4000-8000-000000000055";
+  await store.reserveCoupon("PULSO35", attemptKey, []);
+  await store.createOrder({ appmaxOrderId: 55, checkoutAttemptKey: attemptKey, status: "open", buyerEmail: "buyer@example.test", couponCode: "PULSO35", subtotalCents: 1000, discountCents: 350, totalCents: 650, lines: [] });
   await store.updateOrderFromWebhook({ appmaxOrderId: 55, status: "paid", eventId: "paid-55" });
   await store.updateOrderFromWebhook({ appmaxOrderId: 55, status: "paid", eventId: "paid-55" });
+  await store.updateOrderFromWebhook({ appmaxOrderId: 55, status: "processing", eventId: "late-processing-55" });
   const coupon = await store.getCoupon("PULSO35");
   assert.equal(coupon.redemptions, 1);
   assert.deepEqual(await store.overview(), {
@@ -65,4 +69,62 @@ test("persists checkout orders and applies coupon redemption once on an Appmax w
     paidRevenueCents: 650,
     averageTicketCents: 650,
   });
+});
+
+test("store idempotency is atomic and a one-use coupon cannot be reserved twice", async () => {
+  const store = createInMemoryStore();
+  const [first, duplicate, conflict] = await Promise.all([
+    store.beginCheckoutAttempt("8e616e72-6d03-46f1-9d6a-1ebae6097c70", "a".repeat(64)),
+    store.beginCheckoutAttempt("8e616e72-6d03-46f1-9d6a-1ebae6097c70", "a".repeat(64)),
+    store.beginCheckoutAttempt("8e616e72-6d03-46f1-9d6a-1ebae6097c70", "b".repeat(64)),
+  ]);
+  assert.equal(first.kind, "new"); assert.equal(duplicate.kind, "pending"); assert.equal(conflict.kind, "conflict");
+  await store.saveCoupon({ code: "UNICO", discountBps: 1000, active: true, startsAt: null, endsAt: null, maxRedemptions: 1, productSlugs: [] });
+  const reservations = await Promise.all([
+    store.reserveCoupon("UNICO", "a0000000-0000-4000-8000-000000000001"),
+    store.reserveCoupon("UNICO", "a0000000-0000-4000-8000-000000000002"),
+  ]);
+  assert.equal(reservations.filter(Boolean).length, 1);
+});
+
+test("production refuses the non-persistent fallback", () => {
+  assert.throws(() => createApp({ NODE_ENV: "production", PORT: "3102" }), /MYSQL_URL is required/);
+});
+
+test("reconciles a paid webhook that arrives before local order enrichment", async () => {
+  const store = createInMemoryStore();
+  const attemptKey = "a0000000-0000-4000-8000-000000000088";
+  await store.updateOrderFromWebhook({ appmaxOrderId: 88, status: "paid", eventId: "paid-before-order-88" });
+  await store.reserveCoupon("PULSO35", attemptKey, []);
+  await store.createOrder({
+    appmaxOrderId: 88,
+    checkoutAttemptKey: attemptKey,
+    status: "created",
+    buyerEmail: "buyer@example.test",
+    couponCode: "PULSO35",
+    subtotalCents: 1000,
+    discountCents: 350,
+    totalCents: 650,
+    lines: [],
+  });
+  const coupon = await store.getCoupon("PULSO35");
+  assert.equal(coupon.redemptions, 1);
+  assert.equal((await store.overview()).paidOrders, 1);
+});
+
+test("keeps pending checkout attempts fail-closed and allows only explicit safe abandonment", async () => {
+  const store = createInMemoryStore();
+  const key = "a0000000-0000-4000-8000-000000000099";
+  assert.equal((await store.beginCheckoutAttempt(key, "a".repeat(64))).kind, "new");
+  assert.equal((await store.beginCheckoutAttempt(key, "a".repeat(64))).kind, "pending");
+  await store.abandonCheckoutAttempt(key);
+  assert.equal((await store.beginCheckoutAttempt(key, "a".repeat(64))).kind, "new");
+});
+
+test("order status cannot regress when Appmax events arrive out of order", () => {
+  assert.equal(resolveOrderStatus("processing", "created"), "processing");
+  assert.equal(resolveOrderStatus("failed", "open"), "failed");
+  assert.equal(resolveOrderStatus("failed", "paid"), "paid");
+  assert.equal(resolveOrderStatus("paid", "processing"), "paid");
+  assert.equal(resolveOrderStatus("paid", "refunded"), "refunded");
 });

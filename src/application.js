@@ -15,6 +15,9 @@ import { createMySqlStore } from "./admin/mysql-store.js";
 
 export function createApp(overrides = {}, dependencies = {}) {
   const environment = getEnvironment({ ...process.env, ...overrides });
+  if (environment.nodeEnvironment === "production" && !environment.mysqlUrl) {
+    throw new Error("MYSQL_URL is required in production.");
+  }
   const appmaxClient = dependencies.appmaxClient ?? createAppmaxClient(environment);
   const store = dependencies.store ?? (environment.mysqlUrl ? createMySqlStore(environment.mysqlUrl) : createInMemoryStore());
   const app = express();

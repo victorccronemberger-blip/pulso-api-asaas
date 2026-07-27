@@ -47,6 +47,7 @@ export function getEnvironment(source = process.env) {
   );
 
   return Object.freeze({
+    nodeEnvironment: source.NODE_ENV?.trim().toLowerCase() || "development",
     host: source.HOST?.trim() || "0.0.0.0",
     port: parsePort(source.PORT),
     publicOrigin: source.PUBLIC_ORIGIN?.trim() || "https://pulso.cyara.com.br",

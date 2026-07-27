@@ -75,7 +75,7 @@ test("rejects checkout creation while Appmax is disabled", async (context) => {
     body: JSON.stringify({
       slugs: ["novo-cpa"],
       couponCode: "PULSO35",
-      buyer: buyer(),
+      buyer: { ...buyer(), ip: "198.51.100.17" },
       payment: { method: "pix" },
     }),
   });
@@ -113,7 +113,7 @@ test("creates a Pix payment from server-authoritative prices", async (context) =
       slugs: ["novo-cpa", "simulados-ancord-2026"],
       couponCode: "pulso35",
       clientTotalCents: 1,
-      buyer: buyer(),
+      buyer: { ...buyer(), ip: "198.51.100.17" },
       payment: { method: "pix" },
     }),
   });
@@ -126,6 +126,8 @@ test("creates a Pix payment from server-authoritative prices", async (context) =
     pix: { qrCodeBase64: "aW1hZ2U=", emv: "000201PULSO" },
   });
   assert.equal(calls[1][0], "order");
+  assert.equal(calls[0][1].ip, "127.0.0.1");
+  assert.notEqual(calls[0][1].ip, "198.51.100.17");
   assert.equal(calls[1][1].products[0].unit_value, 97_305);
   assert.equal(calls[1][1].products[1].unit_value, 27_950);
   assert.equal(calls[2][1].payment_data.pix.document_number, "19100000000");
@@ -254,6 +256,89 @@ test("rejects products, coupons and raw card payloads outside the server contrac
     });
     assert.equal(response.status, 400);
   }
+});
+
+test("allows a safe retry with the same idempotency key before an Appmax order exists", async (context) => {
+  let customerCalls = 0;
+  const appmaxClient = {
+    createCustomer: async () => {
+      customerCalls += 1;
+      if (customerCalls === 1) throw Object.assign(new Error("temporary"), { endpoint: "/v1/customers" });
+      return { data: { customer: { id: 409 } } };
+    },
+    createOrder: async () => ({ data: { order: { id: 6010, status: "pendente" } } }),
+    createPixPayment: async () => ({
+      data: {
+        order: { id: 6010, status: "pendente" },
+        payment: { pix_qrcode: "aW1hZ2U=", pix_emv: "000201RETRY" },
+      },
+    }),
+  };
+  const origin = await serve(context, enabledEnvironment, { appmaxClient });
+  const key = crypto.randomUUID();
+  const payload = {
+    slugs: ["novo-cpa"],
+    couponCode: "PULSO35",
+    buyer: buyer(),
+    payment: { method: "pix" },
+  };
+  const first = await fetch(`${origin}/v1/checkout/orders`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": key },
+    body: JSON.stringify(payload),
+  });
+  assert.equal(first.status, 502);
+  assert.equal((await first.json()).retryable, true);
+  const second = await fetch(`${origin}/v1/checkout/orders`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": key },
+    body: JSON.stringify(payload),
+  });
+  assert.equal(second.status, 201);
+  assert.equal((await second.json()).orderId, 6010);
+  assert.equal(customerCalls, 2);
+});
+
+test("replays reconciliation instead of duplicating payment after an ambiguous provider failure", async (context) => {
+  const calls = { customer: 0, order: 0, pix: 0 };
+  const appmaxClient = {
+    createCustomer: async () => {
+      calls.customer += 1;
+      return { data: { customer: { id: 410 } } };
+    },
+    createOrder: async () => {
+      calls.order += 1;
+      return { data: { order: { id: 6011, status: "pendente" } } };
+    },
+    createPixPayment: async () => {
+      calls.pix += 1;
+      throw Object.assign(new Error("timeout"), { endpoint: "/v1/payments/pix" });
+    },
+  };
+  const origin = await serve(context, enabledEnvironment, { appmaxClient });
+  const key = crypto.randomUUID();
+  const payload = {
+    slugs: ["novo-cpa"],
+    couponCode: "PULSO35",
+    buyer: buyer(),
+    payment: { method: "pix" },
+  };
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await fetch(`${origin}/v1/checkout/orders`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": key },
+      body: JSON.stringify(payload),
+    });
+    assert.equal(response.status, 202);
+    assert.deepEqual(await response.json(), {
+      orderId: 6011,
+      status: "processing",
+      method: "pix",
+      totalCents: 97_305,
+      message: "Pedido recebido e em reconciliação com a Appmax.",
+    });
+  }
+  assert.deepEqual(calls, { customer: 1, order: 1, pix: 1 });
 });
 
 test("validates private Appmax installation without exposing merchant credentials", async (context) => {

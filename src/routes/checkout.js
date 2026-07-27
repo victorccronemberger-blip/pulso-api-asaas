@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { CheckoutValidationError, createAuthoritativeQuote } from "../domain/quote.js";
 import { createFixedWindowLimiter } from "../http/fixed-window-limiter.js";
 
-const IDEMPOTENCY_TTL_MS = 30 * 60 * 1000;
 const PAID_STATUSES = new Set([
   "aprovado",
   "integrado",
@@ -42,13 +41,13 @@ function cleanText(value, min, max, label) {
   return text;
 }
 
-function parseBuyer(input) {
+function parseBuyer(input, requestIp) {
   if (!input || typeof input !== "object") throw new CheckoutInputError("Dados do comprador inválidos.");
   const email = String(input.email ?? "").trim().toLowerCase();
   if (email.length > 160 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     throw new CheckoutInputError("E-mail inválido.");
   }
-  const ip = String(input.ip ?? "").trim();
+  const ip = String(requestIp ?? "").replace(/^::ffff:/, "").trim();
   if (ip.length < 3 || ip.length > 64 || !/^[0-9a-f:.]+$/i.test(ip)) {
     throw new CheckoutInputError("Não foi possível validar a conexão do comprador.", "invalid_customer_ip");
   }
@@ -166,7 +165,7 @@ function idempotencyKey(request) {
 
 function handleInputError(error, response) {
   if (error instanceof CheckoutValidationError || error instanceof CheckoutInputError) {
-    response.status(400).json({ error: error.code, message: error.message });
+    response.status(400).json({ error: error.code, message: error.message, retryable: true });
     return true;
   }
   return false;
@@ -175,7 +174,6 @@ function handleInputError(error, response) {
 export function createCheckoutRouter(express, { environment, appmaxClient, store }) {
   const router = express.Router();
   const limiter = createFixedWindowLimiter();
-  const attempts = new Map();
 
   function requireProvider(response) {
     if (environment.checkoutEnabled && appmaxClient) return true;
@@ -238,7 +236,7 @@ export function createCheckoutRouter(express, { environment, appmaxClient, store
     try {
       key = idempotencyKey(request);
       quote = await quoteFromBody(request.body, store);
-      buyer = parseBuyer(request.body?.buyer);
+      buyer = parseBuyer(request.body?.buyer, request.ip);
       payment = parsePayment(request.body?.payment);
     } catch (error) {
       if (handleInputError(error, response)) return;
@@ -246,25 +244,37 @@ export function createCheckoutRouter(express, { environment, appmaxClient, store
     }
 
     const fingerprint = checkoutFingerprint(request.body);
-    const existing = attempts.get(key);
-    if (existing && existing.expiresAt > Date.now()) {
-      if (existing.fingerprint !== fingerprint) {
-        response.status(409).json({
-          error: "idempotency_conflict",
-          message: "Esta tentativa já foi usada com outro pedido.",
-        });
-        return;
-      }
-      const replay = await existing.promise;
-      response.status(replay.status).json(replay.body);
+    const attempt = await store.beginCheckoutAttempt(key, fingerprint);
+    if (attempt.kind === "conflict") {
+      response.status(409).json({ error: "idempotency_conflict", message: "Esta tentativa já foi usada com outro pedido.", retryable: true });
       return;
     }
-
-    for (const [attemptKey, attempt] of attempts) {
-      if (attempt.expiresAt <= Date.now()) attempts.delete(attemptKey);
+    if (attempt.kind === "replay") {
+      response.status(attempt.response.status).json(attempt.response.body);
+      return;
+    }
+    if (attempt.kind === "pending") {
+      response.status(409).json({ error: "idempotency_in_progress", message: "Esta tentativa ainda est\u00e1 sendo processada." });
+      return;
+    }
+    if (quote.coupon) {
+      const reserved = await store.reserveCoupon(
+        quote.coupon.code,
+        key,
+        quote.lines.map((line) => line.product.slug),
+      );
+      if (!reserved) {
+        const result = { status: 400, body: { error: "invalid_coupon", message: "Cupom inv\u00e1lido ou indispon\u00edvel.", retryable: true } };
+        await store.abandonCheckoutAttempt(key);
+        response.status(result.status).json(result.body);
+        return;
+      }
+      quote = createAuthoritativeQuote({ slugs: request.body?.slugs, couponCode: quote.coupon.code }, { coupon: reserved });
     }
 
     const promise = (async () => {
+      let couponReservationBound = false;
+      let persistedOrderId = null;
       try {
         let chargedTotalCents = quote.totalCents;
         if (payment.method === "credit_card") {
@@ -276,11 +286,14 @@ export function createCheckoutRouter(express, { environment, appmaxClient, store
           const options = publicInstallments(installmentsResult, quote.totalCents);
           const chosen = options.find((option) => option.number === payment.installments);
           if (!chosen) {
+            if (quote.coupon) await store.releaseCouponReservation(key);
+            await store.abandonCheckoutAttempt(key);
             return {
               status: 400,
               body: {
                 error: "invalid_installments",
                 message: "O parcelamento escolhido não está disponível.",
+                retryable: true,
               },
             };
           }
@@ -320,6 +333,7 @@ export function createCheckoutRouter(express, { environment, appmaxClient, store
         const orderId = integerId(order?.id, "order id");
         await store?.createOrder({
           appmaxOrderId: orderId,
+          checkoutAttemptKey: quote.coupon ? key : null,
           status: "created",
           buyerEmail: buyer.email,
           couponCode: quote.coupon?.code ?? null,
@@ -328,7 +342,8 @@ export function createCheckoutRouter(express, { environment, appmaxClient, store
           totalCents: chargedTotalCents,
           lines: quote.lines,
         });
-
+        persistedOrderId = orderId;
+        couponReservationBound = Boolean(quote.coupon);
         if (payment.method === "pix") {
           const pixResult = await appmaxClient.createPixPayment({
             order_id: orderId,
@@ -398,27 +413,39 @@ export function createCheckoutRouter(express, { environment, appmaxClient, store
         }
         return result;
       } catch (error) {
+        if (quote.coupon && !couponReservationBound) {
+          await store.releaseCouponReservation(key);
+        }
+        if (!persistedOrderId) {
+          await store.abandonCheckoutAttempt(key);
+        }
         console.error("Appmax checkout failed", {
           endpoint: error?.endpoint,
           status: error?.status,
           type: error?.name,
         });
-        return {
+        return persistedOrderId ? {
+          status: 202,
+          body: {
+            orderId: persistedOrderId,
+            status: "processing",
+            method: payment.method,
+            totalCents: quote.totalCents,
+            message: "Pedido recebido e em reconciliação com a Appmax.",
+          },
+        } : {
           status: 502,
           body: {
             error: "checkout_provider_error",
             message: "O pagamento não pôde ser processado. Revise os dados e tente novamente.",
+            retryable: true,
           },
         };
       }
     })();
 
-    attempts.set(key, {
-      fingerprint,
-      promise,
-      expiresAt: Date.now() + IDEMPOTENCY_TTL_MS,
-    });
     const result = await promise;
+    await store.completeCheckoutAttempt(key, result);
     response.status(result.status).json(result.body);
   });
 
