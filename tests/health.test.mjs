@@ -133,22 +133,10 @@ test("creates a Pix payment from server-authoritative prices", async (context) =
   assert.equal(calls[2][1].payment_data.pix.document_number, "19100000000");
 });
 
-test("tokenized card checkout applies Appmax installment totals without receiving raw card data", async (context) => {
+test("tokenized card checkout applies ten interest-free installments without receiving raw card data", async (context) => {
   const calls = [];
   const appmaxClient = {
-    getInstallments: async (payload) => {
-      calls.push(["installments", payload]);
-      return {
-        data: {
-          installments: {
-            1: { total: 97_305 },
-            2: { total: 99_251 },
-            3: { total: 101_218 },
-          },
-          settings: { modality: "PP", max_installments: 12, min_installment_value: 500 },
-        },
-      };
-    },
+    getInstallments: async () => assert.fail("Interest-free checkout must not add provider interest"),
     createCustomer: async (payload) => {
       calls.push(["customer", payload]);
       return { data: { customer: { id: 407 } } };
@@ -159,7 +147,7 @@ test("tokenized card checkout applies Appmax installment totals without receivin
     },
     createCardPayment: async (payload) => {
       calls.push(["card", payload]);
-      return { data: { order: { id: 6002, status: "autorizado" }, payment: { installments: 3 } } };
+      return { data: { order: { id: 6002, status: "autorizado" }, payment: { installments: 10 } } };
     },
   };
   const origin = await serve(context, enabledEnvironment, { appmaxClient });
@@ -174,7 +162,7 @@ test("tokenized card checkout applies Appmax installment totals without receivin
         method: "credit_card",
         token: "422146c7523a46119d6073ea56193913",
         holderName: "Victor Cronemberger",
-        installments: 3,
+        installments: 10,
       },
     }),
   });
@@ -183,31 +171,22 @@ test("tokenized card checkout applies Appmax installment totals without receivin
     orderId: 6002,
     status: "processing",
     method: "credit_card",
-    installments: 3,
-    totalCents: 101_218,
+    installments: 10,
+    totalCents: 97_305,
   });
   const order = calls.find(([name]) => name === "order")[1];
-  assert.equal(order.products_value, 101_218);
-  assert.equal("unit_value" in order.products[0], false);
+  assert.equal("products_value" in order, false);
+  assert.equal(order.products[0].unit_value, 97_305);
   const card = calls.find(([name]) => name === "card")[1];
   assert.equal(card.payment_data.credit_card.token, "422146c7523a46119d6073ea56193913");
-  assert.equal(card.payment_data.credit_card.installments, 3);
+  assert.equal(card.payment_data.credit_card.installments, 10);
   assert.equal(JSON.stringify(card).includes("number"), true);
   assert.equal(JSON.stringify(card).includes("cvv"), false);
 });
 
-test("returns sanitized Appmax installment options", async (context) => {
+test("returns ten server-authoritative interest-free installment options", async (context) => {
   const appmaxClient = {
-    getInstallments: async () => ({
-      data: {
-        installments: {
-          1: { total: 97_305 },
-          2: { total: 99_251 },
-          3: { total: 101_218 },
-        },
-        settings: { max_installments: 3, min_installment_value: 500 },
-      },
-    }),
+    getInstallments: async () => assert.fail("Interest-free options are owned by the store"),
   };
   const origin = await serve(context, enabledEnvironment, { appmaxClient });
   const response = await fetch(`${origin}/v1/checkout/installments`, {
@@ -218,10 +197,19 @@ test("returns sanitized Appmax installment options", async (context) => {
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), {
     baseTotalCents: 97_305,
+    maximumInstallments: 10,
+    interestFree: true,
     installments: [
-      { number: 1, totalCents: 97_305, installmentCents: 97_305 },
-      { number: 2, totalCents: 99_251, installmentCents: 49_626 },
-      { number: 3, totalCents: 101_218, installmentCents: 33_740 },
+      { number: 1, totalCents: 97_305, installmentCents: 97_305, interestFree: true },
+      { number: 2, totalCents: 97_305, installmentCents: 48_653, interestFree: true },
+      { number: 3, totalCents: 97_305, installmentCents: 32_435, interestFree: true },
+      { number: 4, totalCents: 97_305, installmentCents: 24_327, interestFree: true },
+      { number: 5, totalCents: 97_305, installmentCents: 19_461, interestFree: true },
+      { number: 6, totalCents: 97_305, installmentCents: 16_218, interestFree: true },
+      { number: 7, totalCents: 97_305, installmentCents: 13_901, interestFree: true },
+      { number: 8, totalCents: 97_305, installmentCents: 12_164, interestFree: true },
+      { number: 9, totalCents: 97_305, installmentCents: 10_812, interestFree: true },
+      { number: 10, totalCents: 97_305, installmentCents: 9_731, interestFree: true },
     ],
   });
 });

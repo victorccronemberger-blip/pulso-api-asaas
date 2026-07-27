@@ -1,4 +1,9 @@
 import { createHash } from "node:crypto";
+import {
+  MAX_INTEREST_FREE_INSTALLMENTS,
+  createInterestFreeInstallments,
+  interestFreeInstallment,
+} from "../domain/installments.js";
 import { CheckoutValidationError, createAuthoritativeQuote } from "../domain/quote.js";
 import { createFixedWindowLimiter } from "../http/fixed-window-limiter.js";
 
@@ -71,7 +76,11 @@ function parsePayment(input) {
     throw new CheckoutInputError("Token de cartão inválido.", "invalid_card_token");
   }
   const installments = Number(input.installments);
-  if (!Number.isSafeInteger(installments) || installments < 1 || installments > 12) {
+  if (
+    !Number.isSafeInteger(installments)
+    || installments < 1
+    || installments > MAX_INTEREST_FREE_INSTALLMENTS
+  ) {
     throw new CheckoutInputError("Número de parcelas inválido.", "invalid_installments");
   }
   return {
@@ -118,37 +127,6 @@ function integerId(value, label) {
   const id = Number(value);
   if (!Number.isSafeInteger(id) || id < 1) throw new Error(`Appmax returned no ${label}.`);
   return id;
-}
-
-function publicInstallments(result, baseTotalCents) {
-  const source = result?.data?.installments;
-  if (!source || typeof source !== "object") {
-    return [{ number: 1, totalCents: baseTotalCents, installmentCents: baseTotalCents }];
-  }
-  const maximum = Math.min(12, Number(result?.data?.settings?.max_installments) || 12);
-  const minimum = Math.max(1, Number(result?.data?.settings?.min_installment_value) || 1);
-  const options = Object.entries(source)
-    .map(([key, value]) => {
-      const number = Number(key);
-      const totalCents = Number(value?.total);
-      return {
-        number,
-        totalCents,
-        installmentCents: Number.isSafeInteger(totalCents) ? Math.ceil(totalCents / number) : 0,
-      };
-    })
-    .filter((option) => (
-      Number.isSafeInteger(option.number)
-      && option.number >= 1
-      && option.number <= maximum
-      && Number.isSafeInteger(option.totalCents)
-      && option.totalCents >= baseTotalCents
-      && option.installmentCents >= minimum
-    ))
-    .sort((a, b) => a.number - b.number);
-  return options.length
-    ? options
-    : [{ number: 1, totalCents: baseTotalCents, installmentCents: baseTotalCents }];
 }
 
 function checkoutFingerprint(body) {
@@ -204,26 +182,12 @@ export function createCheckoutRouter(express, { environment, appmaxClient, store
       throw error;
     }
 
-    try {
-      const result = await appmaxClient.getInstallments({
-        installments: 12,
-        total_value: quote.totalCents,
-        settings: true,
-      });
-      response.json({
-        baseTotalCents: quote.totalCents,
-        installments: publicInstallments(result, quote.totalCents),
-      });
-    } catch (error) {
-      console.error("Appmax installment calculation failed", {
-        endpoint: error?.endpoint,
-        status: error?.status,
-      });
-      response.status(502).json({
-        error: "checkout_provider_error",
-        message: "Não foi possível consultar o parcelamento agora.",
-      });
-    }
+    response.json({
+      baseTotalCents: quote.totalCents,
+      maximumInstallments: MAX_INTEREST_FREE_INSTALLMENTS,
+      interestFree: true,
+      installments: createInterestFreeInstallments(quote.totalCents),
+    });
   });
 
   router.post("/orders", limiter, async (request, response) => {
@@ -278,13 +242,7 @@ export function createCheckoutRouter(express, { environment, appmaxClient, store
       try {
         let chargedTotalCents = quote.totalCents;
         if (payment.method === "credit_card") {
-          const installmentsResult = await appmaxClient.getInstallments({
-            installments: payment.installments,
-            total_value: quote.totalCents,
-            settings: true,
-          });
-          const options = publicInstallments(installmentsResult, quote.totalCents);
-          const chosen = options.find((option) => option.number === payment.installments);
+          const chosen = interestFreeInstallment(quote.totalCents, payment.installments);
           if (!chosen) {
             if (quote.coupon) await store.releaseCouponReservation(key);
             await store.abandonCheckoutAttempt(key);
@@ -318,15 +276,10 @@ export function createCheckoutRouter(express, { environment, appmaxClient, store
           name: line.product.title,
           quantity: 1,
           type: "digital",
-          ...(payment.method === "pix" || payment.installments === 1
-            ? { unit_value: line.finalPriceCents }
-            : {}),
+          unit_value: line.finalPriceCents,
         }));
         const orderResult = await appmaxClient.createOrder({
           customer_id: customerId,
-          ...(payment.method === "credit_card" && payment.installments > 1
-            ? { products_value: chargedTotalCents }
-            : {}),
           products,
         });
         const order = appmaxOrder(orderResult);
