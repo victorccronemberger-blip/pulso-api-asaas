@@ -1,5 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
-import { asaasOrderStatus } from "./checkout.js";
+import { normalizeAsaasPaymentStatus } from "../domain/payment-status.js";
+import { normalizeProviderInstallment } from "../services/installment-service.js";
 
 function safeEqual(received, expected) {
   const left = Buffer.from(String(received ?? ""), "utf8");
@@ -12,7 +13,7 @@ function paymentId(value) {
   return /^[A-Za-z0-9_-]{6,80}$/.test(id) ? id : null;
 }
 
-export function createAsaasWebhookHandler({ environment, store, onOrderPaid }) {
+export function createAsaasWebhookHandler({ environment, store }) {
   return async function asaasWebhook(request, response) {
     if (!environment.asaasWebhookToken) {
       response.status(503).json({ error: "webhook_not_configured" });
@@ -40,25 +41,30 @@ export function createAsaasWebhookHandler({ environment, store, onOrderPaid }) {
     }
 
     try {
-      const persisted = await store.updateOrderFromWebhook({
-        provider: "asaas",
-        providerOrderId: orderId,
-        providerGroupId,
-        status: asaasOrderStatus(payment?.status),
-        eventId,
-      });
-      const becamePaid = !persisted?.duplicate
-        && persisted?.status === "paid"
-        && persisted?.previousStatus !== "paid";
-      response.status(200).json({ received: true, duplicate: Boolean(persisted?.duplicate) });
-      if (becamePaid && onOrderPaid) {
-        onOrderPaid(persisted.id).catch((error) => {
-          console.error("Could not enqueue enrollment for paid order", {
-            orderId: persisted.id,
-            type: error?.name,
-          });
+      let persisted;
+      if (providerGroupId) {
+        const installment = normalizeProviderInstallment(payment);
+        if (!installment) {
+          response.status(400).json({ error: "invalid_installment_webhook" });
+          return;
+        }
+        persisted = await store.updatePaymentInstallmentFromWebhook({
+          provider: "asaas",
+          providerOrderId: orderId,
+          providerGroupId,
+          installment,
+          eventId,
+        });
+      } else {
+        persisted = await store.updateOrderFromWebhook({
+          provider: "asaas",
+          providerOrderId: orderId,
+          providerGroupId: null,
+          status: normalizeAsaasPaymentStatus(payment?.status),
+          eventId,
         });
       }
+      response.status(200).json({ received: true, duplicate: Boolean(persisted?.duplicate) });
     } catch (error) {
       console.error("Could not persist Asaas webhook", {
         event,

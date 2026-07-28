@@ -18,14 +18,32 @@ import {
   validateCustomerRegistration,
 } from "../customer/validation.js";
 import { parseCookies } from "../admin/security.js";
+import { publicInstallmentPlan } from "../services/installment-service.js";
 
 const ORDER_ID = /^[0-9a-f-]{36}$/i;
 
-export function createCustomerRouter(express, { environment, store }) {
+export function createCustomerRouter(express, {
+  environment,
+  installmentService,
+  store,
+}) {
   const router = express.Router();
   const limiter = createFixedWindowLimiter();
   const pepper = environment.sessionPepper;
   const ttlSeconds = environment.sessionTtlSeconds;
+  router.use((_request, response, next) => {
+    response.set("Cache-Control", "no-store");
+    next();
+  });
+
+  async function withInstallmentPlan(order) {
+    if (!order || order.paymentMethod !== "pix_installment") return order;
+    const rows = await store.listPaymentInstallments(order.id);
+    return {
+      ...order,
+      pixInstallmentPlan: publicInstallmentPlan(rows, order.installments),
+    };
+  }
 
   async function requireSession(request, response) {
     const session = await customerSessionFromRequest(request, store, pepper);
@@ -78,12 +96,22 @@ export function createCustomerRouter(express, { environment, store }) {
       return;
     }
     const credentials = await hashPassword(input.password);
-    const customer = await store.createCustomer({
-      email: input.email,
-      displayName: input.displayName,
-      passwordSalt: credentials.salt,
-      passwordHash: credentials.hash,
-    });
+    let customer;
+    try {
+      customer = await store.createCustomer({
+        email: input.email,
+        displayName: input.displayName,
+        passwordSalt: credentials.salt,
+        passwordHash: credentials.hash,
+      });
+    } catch (error) {
+      if (error?.code !== "ER_DUP_ENTRY") throw error;
+      response.status(409).json({
+        error: "customer_exists",
+        message: "Este e-mail já possui uma conta. Entre com sua senha.",
+      });
+      return;
+    }
     const csrfToken = await createSession(response, customer.id);
     response.status(201).json({
       authenticated: true,
@@ -139,7 +167,7 @@ export function createCustomerRouter(express, { environment, store }) {
     const session = await requireSession(request, response);
     if (!session) return;
     const orders = await store.listCustomerOrders(session.customer.id, { limit: 50 });
-    response.json({ orders });
+    response.json({ orders: await Promise.all(orders.map(withInstallmentPlan)) });
   });
 
   router.get("/orders/:orderId", async (request, response) => {
@@ -154,7 +182,39 @@ export function createCustomerRouter(express, { environment, store }) {
       response.status(404).json({ error: "order_not_found", message: "Pedido não encontrado." });
       return;
     }
-    response.json({ order });
+    response.json({ order: await withInstallmentPlan(order) });
+  });
+
+  router.post("/orders/:orderId/installments/refresh", limiter, async (request, response) => {
+    const session = await requireSession(request, response);
+    if (!session) return;
+    if (!requireCsrf(request, response, session)) return;
+    if (!ORDER_ID.test(request.params.orderId)) {
+      response.status(404).json({ error: "order_not_found", message: "Pedido não encontrado." });
+      return;
+    }
+    const order = await store.getCustomerOrderForSync(
+      session.customer.id,
+      request.params.orderId,
+    );
+    if (!order || order.paymentMethod !== "pix_installment") {
+      response.status(404).json({ error: "installment_plan_not_found", message: "Parcelamento não encontrado." });
+      return;
+    }
+    try {
+      const pixInstallmentPlan = await installmentService.sync(order);
+      response.json({ pixInstallmentPlan });
+    } catch (error) {
+      console.error("Could not refresh Asaas installment plan", {
+        orderId: order.id,
+        code: error?.code,
+        type: error?.name,
+      });
+      response.status(502).json({
+        error: "installment_refresh_failed",
+        message: "Não foi possível atualizar as parcelas agora.",
+      });
+    }
   });
 
   return router;

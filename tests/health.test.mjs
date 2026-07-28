@@ -300,7 +300,7 @@ test("creates a ten-installment hosted Asaas invoice without receiving card data
   });
 });
 
-test("returns ten server-authoritative interest-free installment options", async (context) => {
+test("returns card terms separately without claiming Pix is interest-free", async (context) => {
   const origin = await serve(context, enabledEnvironment, { asaasClient: {} });
   const response = await fetch(`${origin}/v1/checkout/installments`, {
     method: "POST",
@@ -311,12 +311,25 @@ test("returns ten server-authoritative interest-free installment options", async
   const result = await response.json();
   assert.equal(result.maximumInstallments, 10);
   assert.equal(result.maximumPixInstallments, 6);
-  assert.equal(result.interestFree, true);
+  assert.equal(result.interestFree, undefined);
+  assert.equal(result.cardInterestFree, true);
+  assert.equal(result.pixTotalPreserved, true);
   assert.equal(result.installments.length, 10);
+  assert.equal(result.cardInstallments.length, 10);
+  assert.equal(result.pixInstallments.length, 5);
+  assert.deepEqual(result.pixInstallments[0], {
+    number: 2,
+    totalCents: 75_000,
+    installmentCents: 37_500,
+    lastInstallmentCents: 37_500,
+    installmentAmountsCents: [37_500, 37_500],
+  });
   assert.deepEqual(result.installments[9], {
     number: 10,
     totalCents: 75_000,
     installmentCents: 7_500,
+    lastInstallmentCents: 7_500,
+    installmentAmountsCents: Array(10).fill(7_500),
     interestFree: true,
   });
 });

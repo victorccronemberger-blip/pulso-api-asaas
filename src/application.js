@@ -3,7 +3,6 @@ import express from "express";
 import helmet from "helmet";
 import { getEnvironment } from "./config/environment.js";
 import { createAsaasClient } from "./integrations/asaas/client.js";
-import { createArtIntegration } from "./integrations/art/index.js";
 import { createAsaasWebhookHandler } from "./routes/asaas-integration.js";
 import { createCheckoutRouter } from "./routes/checkout.js";
 import { createHealthRouter } from "./routes/health.js";
@@ -11,21 +10,25 @@ import { createAdminRouter, createPublicCommerceRouter } from "./routes/admin.js
 import { createCustomerRouter } from "./routes/customer.js";
 import { createInMemoryStore } from "./admin/in-memory-store.js";
 import { createMySqlStore } from "./admin/mysql-store.js";
+import { createInstallmentService } from "./services/installment-service.js";
+import { requestContext } from "./http/request-context.js";
+import { jsonErrorHandler } from "./http/error-handler.js";
 
 export function createApp(overrides = {}, dependencies = {}) {
   const environment = getEnvironment({ ...process.env, ...overrides });
   if (environment.nodeEnvironment === "production" && !environment.mysqlUrl) {
     throw new Error("MYSQL_URL is required in production.");
   }
+  if (environment.nodeEnvironment === "production" && !environment.sessionPepper) {
+    throw new Error("SESSION_PEPPER is required in production.");
+  }
+  if (environment.nodeEnvironment === "production" && environment.checkoutEnabled && !environment.asaasWebhookToken) {
+    throw new Error("ASAAS_WEBHOOK_TOKEN is required when checkout is enabled in production.");
+  }
   const asaasClient = dependencies.asaasClient ?? createAsaasClient(environment);
   const store = dependencies.store ?? (environment.mysqlUrl ? createMySqlStore(environment.mysqlUrl) : createInMemoryStore());
-  const artIntegration = dependencies.artIntegration ?? createArtIntegration({ environment, store });
-  const onOrderPaid = artIntegration
-    ? async (orderId) => {
-        const order = await store.getOrderWithItems(orderId);
-        await artIntegration.queue.enqueueOrder(order);
-      }
-    : null;
+  const installmentService = dependencies.installmentService
+    ?? createInstallmentService({ asaasClient, store });
   const app = express();
   const readiness = {
     status: "connecting",
@@ -42,11 +45,6 @@ export function createApp(overrides = {}, dependencies = {}) {
       readiness.error = error?.code || error?.name || "database_initialization_failed";
       throw error;
     });
-  if (artIntegration) {
-    ready.then(() => artIntegration.queue.start()).catch((error) => {
-      console.error("PULSO API enrollment queue failed to start.", { message: error?.message });
-    });
-  }
   const waitForReady = () => {
     if (readiness.status !== "connecting") return Promise.resolve();
     return new Promise((resolve) => {
@@ -62,6 +60,7 @@ export function createApp(overrides = {}, dependencies = {}) {
   app.disable("x-powered-by");
   app.set("trust proxy", 1);
   app.use(helmet());
+  app.use(requestContext);
   app.use(cors({
     origin: [environment.publicOrigin, environment.adminOrigin, environment.sitesOrigin],
     methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
@@ -82,11 +81,20 @@ export function createApp(overrides = {}, dependencies = {}) {
   });
   app.post(
     "/v1/webhooks/asaas",
-    createAsaasWebhookHandler({ environment, store, onOrderPaid }),
+    createAsaasWebhookHandler({ environment, store }),
   );
-  app.use("/v1/checkout", createCheckoutRouter(express, { environment, asaasClient, store }));
-  app.use("/v1/customer", createCustomerRouter(express, { environment, store }));
-  app.use("/v1/admin", createAdminRouter(express, { environment, store, queue: artIntegration?.queue }));
+  app.use("/v1/checkout", createCheckoutRouter(express, {
+    environment,
+    asaasClient,
+    installmentService,
+    store,
+  }));
+  app.use("/v1/customer", createCustomerRouter(express, {
+    environment,
+    installmentService,
+    store,
+  }));
+  app.use("/v1/admin", createAdminRouter(express, { environment, store }));
   app.use("/v1/public", createPublicCommerceRouter(express, { store }));
 
   app.use((_request, response) => {
@@ -95,6 +103,7 @@ export function createApp(overrides = {}, dependencies = {}) {
       message: "Esta API está reservada para os serviços do PULSO.",
     });
   });
+  app.use(jsonErrorHandler);
 
-  return { app, environment, asaasClient, store, artIntegration, readiness, ready, waitForReady };
+  return { app, environment, asaasClient, installmentService, store, readiness, ready, waitForReady };
 }

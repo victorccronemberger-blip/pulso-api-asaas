@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createApp } from "./application.js";
 
-const { app, environment, artIntegration, ready } = createApp();
+const { app, environment, ready, store } = createApp();
 const server = app.listen(environment.port, environment.host, () => {
   console.log(`PULSO API listening on ${environment.host}:${environment.port}`);
   if (environment.asaasApiKey) {
@@ -29,10 +29,17 @@ ready
 
 function shutdown(signal) {
   console.log(`PULSO API received ${signal}.`);
-  server.close((error) => {
+  server.close(async (error) => {
+    try {
+      await store.close();
+    } catch (closeError) {
+      console.error("PULSO API could not close its persistent store.", {
+        type: closeError?.name,
+      });
+      error ??= closeError;
+    }
     process.exitCode = error ? 1 : 0;
   });
-  if (artIntegration) artIntegration.queue.shutdown();
 }
 
 process.once("SIGINT", () => shutdown("SIGINT"));
