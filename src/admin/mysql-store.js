@@ -19,7 +19,7 @@ export function createMySqlStore(databaseUrl) {
         `CREATE TABLE IF NOT EXISTS administrators (id CHAR(36) PRIMARY KEY, email VARCHAR(160) NOT NULL UNIQUE, password_salt VARCHAR(64) NOT NULL, password_hash VARCHAR(128) NOT NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3))`,
         `CREATE TABLE IF NOT EXISTS admin_sessions (id CHAR(36) PRIMARY KEY, admin_id CHAR(36) NOT NULL, token_hash CHAR(64) NOT NULL UNIQUE, csrf_hash CHAR(64) NOT NULL, expires_at DATETIME(3) NOT NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), INDEX admin_sessions_expiry (expires_at), CONSTRAINT admin_sessions_admin_fk FOREIGN KEY (admin_id) REFERENCES administrators(id) ON DELETE CASCADE)`,
         `CREATE TABLE IF NOT EXISTS coupons (id CHAR(36) PRIMARY KEY, code VARCHAR(32) NOT NULL UNIQUE, discount_bps SMALLINT UNSIGNED NOT NULL, active TINYINT(1) NOT NULL DEFAULT 1, starts_at DATETIME(3) NULL, ends_at DATETIME(3) NULL, max_redemptions INT UNSIGNED NULL, product_scope_json JSON NOT NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3), INDEX coupons_active (active, starts_at, ends_at))`,
-        `CREATE TABLE IF NOT EXISTS orders (id CHAR(36) PRIMARY KEY, provider VARCHAR(24) NOT NULL, provider_order_id VARCHAR(80) NOT NULL, status VARCHAR(32) NOT NULL, buyer_email VARCHAR(160) NULL, subtotal_cents INT UNSIGNED NOT NULL, discount_cents INT UNSIGNED NOT NULL, total_cents INT UNSIGNED NOT NULL, coupon_code VARCHAR(32) NULL, coupon_redeemed TINYINT(1) NOT NULL DEFAULT 0, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3), UNIQUE INDEX orders_provider_order (provider, provider_order_id), INDEX orders_status_updated (status, updated_at))`,
+        `CREATE TABLE IF NOT EXISTS orders (id CHAR(36) PRIMARY KEY, provider VARCHAR(24) NOT NULL, provider_order_id VARCHAR(80) NOT NULL, provider_group_id VARCHAR(80) NULL, status VARCHAR(32) NOT NULL, buyer_email VARCHAR(160) NULL, subtotal_cents INT UNSIGNED NOT NULL, discount_cents INT UNSIGNED NOT NULL, total_cents INT UNSIGNED NOT NULL, coupon_code VARCHAR(32) NULL, coupon_redeemed TINYINT(1) NOT NULL DEFAULT 0, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3), UNIQUE INDEX orders_provider_order (provider, provider_order_id), INDEX orders_provider_group (provider, provider_group_id), INDEX orders_status_updated (status, updated_at))`,
         `CREATE TABLE IF NOT EXISTS order_items (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, order_id CHAR(36) NOT NULL, course_slug VARCHAR(80) NOT NULL, title VARCHAR(180) NOT NULL, base_price_cents INT UNSIGNED NOT NULL, discount_cents INT UNSIGNED NOT NULL, final_price_cents INT UNSIGNED NOT NULL, CONSTRAINT order_items_order_fk FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE)`,
         `CREATE TABLE IF NOT EXISTS coupon_redemptions (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, coupon_code VARCHAR(32) NOT NULL, order_id CHAR(36) NOT NULL UNIQUE, redeemed_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), INDEX coupon_redemptions_code (coupon_code))`,
         `CREATE TABLE IF NOT EXISTS coupon_reservations (attempt_key CHAR(36) PRIMARY KEY, coupon_code VARCHAR(32) NOT NULL, provider VARCHAR(24) NULL, provider_order_id VARCHAR(80) NULL, expires_at DATETIME(3) NOT NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), UNIQUE INDEX coupon_reservations_provider_order (provider, provider_order_id), INDEX coupon_reservations_code_expiry (coupon_code, expires_at))`,
@@ -33,6 +33,7 @@ export function createMySqlStore(databaseUrl) {
       const orderColumnNames = new Set(orderColumns.map((column) => column.Field));
       if (!orderColumnNames.has("provider")) await pool.query("ALTER TABLE orders ADD COLUMN provider VARCHAR(24) NULL AFTER id");
       if (!orderColumnNames.has("provider_order_id")) await pool.query("ALTER TABLE orders ADD COLUMN provider_order_id VARCHAR(80) NULL AFTER provider");
+      if (!orderColumnNames.has("provider_group_id")) await pool.query("ALTER TABLE orders ADD COLUMN provider_group_id VARCHAR(80) NULL AFTER provider_order_id");
       if (orderColumnNames.has("appmax_order_id")) {
         await pool.query("ALTER TABLE orders MODIFY appmax_order_id BIGINT UNSIGNED NULL");
         await pool.query("UPDATE orders SET provider='appmax', provider_order_id=CAST(appmax_order_id AS CHAR) WHERE provider_order_id IS NULL AND appmax_order_id IS NOT NULL");
@@ -40,6 +41,8 @@ export function createMySqlStore(databaseUrl) {
       await pool.query("ALTER TABLE orders MODIFY provider VARCHAR(24) NOT NULL, MODIFY provider_order_id VARCHAR(80) NOT NULL");
       const [orderIndexes] = await pool.query("SHOW INDEX FROM orders WHERE Key_name='orders_provider_order'");
       if (!orderIndexes.length) await pool.query("ALTER TABLE orders ADD UNIQUE INDEX orders_provider_order (provider, provider_order_id)");
+      const [orderGroupIndexes] = await pool.query("SHOW INDEX FROM orders WHERE Key_name='orders_provider_group'");
+      if (!orderGroupIndexes.length) await pool.query("ALTER TABLE orders ADD INDEX orders_provider_group (provider, provider_group_id)");
 
       const [reservationColumns] = await pool.query("SHOW COLUMNS FROM coupon_reservations");
       const reservationColumnNames = new Set(reservationColumns.map((column) => column.Field));
@@ -74,8 +77,120 @@ export function createMySqlStore(databaseUrl) {
     async abandonCheckoutAttempt(key) { await ensureSchema(); await pool.query("DELETE FROM checkout_attempts WHERE idempotency_key=? AND state='pending'",[key]); },
     async reserveCoupon(code, attemptKey, slugs = []) { await ensureSchema(); const connection=await pool.getConnection(); try { await connection.beginTransaction(); await connection.query("DELETE FROM coupon_reservations WHERE expires_at<=NOW(3)"); const [[row]]=await connection.query("SELECT c.*, (SELECT COUNT(*) FROM coupon_redemptions r WHERE r.coupon_code=c.code) redemptions FROM coupons c WHERE c.code=? FOR UPDATE",[code]); const c=coupon(row); if(!c||!c.active||(c.startsAt&&+new Date(c.startsAt)>Date.now())||(c.endsAt&&+new Date(c.endsAt)<=Date.now())||(c.productSlugs.length&&!slugs.every((slug)=>c.productSlugs.includes(slug)))){await connection.rollback();return null;} const [[reserved]]=await connection.query("SELECT COUNT(*) total FROM coupon_reservations WHERE coupon_code=? AND expires_at>NOW(3)",[code]); if(c.maxRedemptions!==null&&c.redemptions+Number(reserved.total)>=c.maxRedemptions){await connection.rollback();return null;} await connection.query("INSERT INTO coupon_reservations (attempt_key,coupon_code,expires_at) VALUES (?,?,DATE_ADD(NOW(3), INTERVAL 24 HOUR))",[attemptKey,code]); await connection.commit();return c;}catch(error){await connection.rollback();throw error;}finally{connection.release();} },
     async releaseCouponReservation(attemptKey) { await ensureSchema(); await pool.query("DELETE FROM coupon_reservations WHERE attempt_key=?",[attemptKey]); },
-    async createOrder(order) { await ensureSchema(); const connection=await pool.getConnection(); try { await connection.beginTransaction(); const [[existing]]=await connection.query("SELECT id,status,coupon_redeemed FROM orders WHERE provider=? AND provider_order_id=? FOR UPDATE",[order.provider,order.providerOrderId]); const orderId=existing?.id??id(); const status=resolveOrderStatus(existing?.status,order.status); if(existing){await connection.query("UPDATE orders SET status=?,buyer_email=?,subtotal_cents=?,discount_cents=?,total_cents=?,coupon_code=? WHERE id=?",[status,order.buyerEmail,order.subtotalCents,order.discountCents,order.totalCents,order.couponCode,orderId]);await connection.query("DELETE FROM order_items WHERE order_id=?",[orderId]);}else{await connection.query("INSERT INTO orders (id,provider,provider_order_id,status,buyer_email,subtotal_cents,discount_cents,total_cents,coupon_code) VALUES (?,?,?,?,?,?,?,?,?)",[orderId,order.provider,order.providerOrderId,status,order.buyerEmail,order.subtotalCents,order.discountCents,order.totalCents,order.couponCode]);} for(const line of order.lines)await connection.query("INSERT INTO order_items (order_id,course_slug,title,base_price_cents,discount_cents,final_price_cents) VALUES (?,?,?,?,?,?)",[orderId,line.product.slug,line.product.title,line.basePriceCents,line.discountCents,line.finalPriceCents]); if(order.checkoutAttemptKey){const [bound]=await connection.query("UPDATE coupon_reservations SET provider=?,provider_order_id=? WHERE attempt_key=?",[order.provider,order.providerOrderId,order.checkoutAttemptKey]);if(!bound.affectedRows)throw new Error("Coupon reservation is missing.");} if(status==='paid'&&order.couponCode&&!existing?.coupon_redeemed){await connection.query("INSERT INTO coupon_redemptions (coupon_code,order_id) VALUES (?,?)",[order.couponCode,orderId]);await connection.query("UPDATE orders SET coupon_redeemed=1 WHERE id=?",[orderId]);await connection.query("DELETE FROM coupon_reservations WHERE attempt_key=?",[order.checkoutAttemptKey]);} await connection.commit();return{id:orderId,...order,status};}catch(error){await connection.rollback();throw error;}finally{connection.release();} },
-    async updateOrderFromWebhook({ provider,providerOrderId,status,eventId }) { await ensureSchema(); const connection=await pool.getConnection(); try { await connection.beginTransaction(); if(eventId){const [seen]=await connection.query("SELECT event_id FROM webhook_events WHERE event_id=?",[eventId]); if(seen.length){await connection.rollback();return {duplicate:true};}} let [[order]]=await connection.query("SELECT * FROM orders WHERE provider=? AND provider_order_id=? FOR UPDATE",[provider,providerOrderId]); if(!order){const reconciledId=id();await connection.query("INSERT INTO orders (id,provider,provider_order_id,status,buyer_email,subtotal_cents,discount_cents,total_cents,coupon_code) VALUES (?,?,?,?,NULL,0,0,0,NULL)",[reconciledId,provider,providerOrderId,status]);order={id:reconciledId,status,coupon_code:null,coupon_redeemed:0};} const nextStatus=resolveOrderStatus(order.status,status); if(eventId)await connection.query("INSERT INTO webhook_events (event_id) VALUES (?)",[eventId]); await connection.query("UPDATE orders SET status=? WHERE id=?",[nextStatus,order.id]); if(nextStatus==='paid'&&!order.coupon_redeemed&&order.coupon_code){const [[reservation]]=await connection.query("SELECT attempt_key FROM coupon_reservations WHERE provider=? AND provider_order_id=? FOR UPDATE",[provider,providerOrderId]); if(!reservation)throw new Error("Paid order has no coupon reservation."); await connection.query("INSERT INTO coupon_redemptions (coupon_code,order_id) VALUES (?,?)",[order.coupon_code,order.id]);await connection.query("UPDATE orders SET coupon_redeemed=1 WHERE id=?",[order.id]);await connection.query("DELETE FROM coupon_reservations WHERE attempt_key=?",[reservation.attempt_key]);} if(['failed','refunded','chargeback'].includes(nextStatus))await connection.query("DELETE FROM coupon_reservations WHERE provider=? AND provider_order_id=?",[provider,providerOrderId]); await connection.commit();return{id:order.id,status:nextStatus};}catch(e){await connection.rollback();throw e;}finally{connection.release();} },
+    async createOrder(order) {
+      await ensureSchema();
+      const connection = await pool.getConnection();
+      try {
+        await connection.beginTransaction();
+        const [[existing]] = await connection.query(
+          "SELECT id,status,coupon_redeemed FROM orders WHERE provider=? AND provider_order_id=? FOR UPDATE",
+          [order.provider, order.providerOrderId],
+        );
+        const orderId = existing?.id ?? id();
+        const status = resolveOrderStatus(existing?.status, order.status);
+        if (existing) {
+          await connection.query(
+            "UPDATE orders SET provider_group_id=?,status=?,buyer_email=?,subtotal_cents=?,discount_cents=?,total_cents=?,coupon_code=? WHERE id=?",
+            [order.providerGroupId ?? null, status, order.buyerEmail, order.subtotalCents, order.discountCents, order.totalCents, order.couponCode, orderId],
+          );
+          await connection.query("DELETE FROM order_items WHERE order_id=?", [orderId]);
+        } else {
+          await connection.query(
+            "INSERT INTO orders (id,provider,provider_order_id,provider_group_id,status,buyer_email,subtotal_cents,discount_cents,total_cents,coupon_code) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [orderId, order.provider, order.providerOrderId, order.providerGroupId ?? null, status, order.buyerEmail, order.subtotalCents, order.discountCents, order.totalCents, order.couponCode],
+          );
+        }
+        for (const line of order.lines) {
+          await connection.query(
+            "INSERT INTO order_items (order_id,course_slug,title,base_price_cents,discount_cents,final_price_cents) VALUES (?,?,?,?,?,?)",
+            [orderId, line.product.slug, line.product.title, line.basePriceCents, line.discountCents, line.finalPriceCents],
+          );
+        }
+        if (order.checkoutAttemptKey) {
+          const [bound] = await connection.query(
+            "UPDATE coupon_reservations SET provider=?,provider_order_id=? WHERE attempt_key=?",
+            [order.provider, order.providerOrderId, order.checkoutAttemptKey],
+          );
+          if (!bound.affectedRows) throw new Error("Coupon reservation is missing.");
+        }
+        if (status === "paid" && order.couponCode && !existing?.coupon_redeemed) {
+          await connection.query("INSERT INTO coupon_redemptions (coupon_code,order_id) VALUES (?,?)", [order.couponCode, orderId]);
+          await connection.query("UPDATE orders SET coupon_redeemed=1 WHERE id=?", [orderId]);
+          await connection.query("DELETE FROM coupon_reservations WHERE attempt_key=?", [order.checkoutAttemptKey]);
+        }
+        await connection.commit();
+        return { id: orderId, ...order, status };
+      } catch (error) {
+        await connection.rollback();
+        throw error;
+      } finally {
+        connection.release();
+      }
+    },
+    async updateOrderFromWebhook({ provider, providerOrderId, providerGroupId, status, eventId }) {
+      await ensureSchema();
+      const connection = await pool.getConnection();
+      try {
+        await connection.beginTransaction();
+        if (eventId) {
+          const [seen] = await connection.query("SELECT event_id FROM webhook_events WHERE event_id=?", [eventId]);
+          if (seen.length) {
+            await connection.rollback();
+            return { duplicate: true };
+          }
+        }
+        let [[order]] = await connection.query(
+          "SELECT * FROM orders WHERE provider=? AND provider_order_id=? FOR UPDATE",
+          [provider, providerOrderId],
+        );
+        if (!order && providerGroupId) {
+          [[order]] = await connection.query(
+            "SELECT * FROM orders WHERE provider=? AND provider_group_id=? ORDER BY created_at ASC LIMIT 1 FOR UPDATE",
+            [provider, providerGroupId],
+          );
+        }
+        if (!order) {
+          const reconciledId = id();
+          await connection.query(
+            "INSERT INTO orders (id,provider,provider_order_id,provider_group_id,status,buyer_email,subtotal_cents,discount_cents,total_cents,coupon_code) VALUES (?,?,?,?,?,NULL,0,0,0,NULL)",
+            [reconciledId, provider, providerOrderId, providerGroupId ?? null, status],
+          );
+          order = {
+            id: reconciledId,
+            status,
+            coupon_code: null,
+            coupon_redeemed: 0,
+            provider_order_id: providerOrderId,
+          };
+        }
+        const nextStatus = resolveOrderStatus(order.status, status);
+        if (eventId) await connection.query("INSERT INTO webhook_events (event_id) VALUES (?)", [eventId]);
+        await connection.query("UPDATE orders SET status=? WHERE id=?", [nextStatus, order.id]);
+        if (nextStatus === "paid" && !order.coupon_redeemed && order.coupon_code) {
+          const [[reservation]] = await connection.query(
+            "SELECT attempt_key FROM coupon_reservations WHERE provider=? AND provider_order_id=? FOR UPDATE",
+            [provider, order.provider_order_id],
+          );
+          if (!reservation) throw new Error("Paid order has no coupon reservation.");
+          await connection.query("INSERT INTO coupon_redemptions (coupon_code,order_id) VALUES (?,?)", [order.coupon_code, order.id]);
+          await connection.query("UPDATE orders SET coupon_redeemed=1 WHERE id=?", [order.id]);
+          await connection.query("DELETE FROM coupon_reservations WHERE attempt_key=?", [reservation.attempt_key]);
+        }
+        if (["failed", "refunded", "chargeback"].includes(nextStatus)) {
+          await connection.query(
+            "DELETE FROM coupon_reservations WHERE provider=? AND provider_order_id=?",
+            [provider, order.provider_order_id],
+          );
+        }
+        await connection.commit();
+        return { id: order.id, status: nextStatus };
+      } catch (error) {
+        await connection.rollback();
+        throw error;
+      } finally {
+        connection.release();
+      }
+    },
     async getCampaign() { await ensureSchema(); const [[row]]=await pool.query("SELECT setting_value FROM app_settings WHERE setting_key='campaign'"); return fromJson(row?.setting_value, {activeCouponCode:null,headline:null}); },
     async saveCampaign(value) { await ensureSchema(); const next={...(await this.getCampaign()),...value}; await pool.query("INSERT INTO app_settings (setting_key,setting_value) VALUES ('campaign',?) ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)",[asJson(next)]); return next; },
     async audit(entry) { await ensureSchema(); await pool.query("INSERT INTO admin_audit_log (id,admin_id,action,entity_type,entity_id,metadata_json) VALUES (?,?,?,?,?,?)",[id(),entry.adminId??null,entry.action,entry.entityType,entry.entityId??null,JSON.stringify(entry.metadata??{})]); },

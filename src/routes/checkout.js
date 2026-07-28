@@ -62,16 +62,18 @@ function parseBuyer(input, requestIp) {
 function parsePayment(input) {
   if (!input || typeof input !== "object") throw new CheckoutInputError("Meio de pagamento inválido.");
   if (input.method === "pix") return { method: "pix", installments: 1 };
-  if (input.method !== "credit_card") throw new CheckoutInputError("Meio de pagamento inválido.");
+  if (!["pix_installment", "credit_card"].includes(input.method)) {
+    throw new CheckoutInputError("Meio de pagamento inválido.");
+  }
   const installments = Number(input.installments);
   if (
     !Number.isSafeInteger(installments)
-    || installments < 1
+    || installments < (input.method === "pix_installment" ? 2 : 1)
     || installments > MAX_INTEREST_FREE_INSTALLMENTS
   ) {
     throw new CheckoutInputError("Número de parcelas inválido.", "invalid_installments");
   }
-  return { method: "credit_card", installments };
+  return { method: input.method, installments };
 }
 
 async function quoteFromBody(body, store) {
@@ -145,14 +147,15 @@ async function findOrCreateCustomer(asaasClient, buyer, key) {
 }
 
 function paymentPayload({ customerId, quote, payment, key }) {
+  const pixMethod = payment.method === "pix" || payment.method === "pix_installment";
   const payload = {
     customer: customerId,
-    billingType: payment.method === "pix" ? "PIX" : "CREDIT_CARD",
+    billingType: pixMethod ? "PIX" : "CREDIT_CARD",
     dueDate: dueDate(),
     description: quote.lines.map((line) => line.product.title).join(" + ").slice(0, 500),
     externalReference: `pulso:${key}`,
   };
-  if (payment.method === "credit_card" && payment.installments > 1) {
+  if (payment.installments > 1) {
     return {
       ...payload,
       installmentCount: payment.installments,
@@ -209,8 +212,10 @@ export function createCheckoutRouter(express, { environment, asaasClient, store 
       enabled: environment.checkoutEnabled,
       provider: "asaas",
       environment: environment.asaasEnvironment,
-      methods: environment.checkoutEnabled ? ["pix", "credit_card"] : [],
+      methods: environment.checkoutEnabled ? ["pix", "pix_installment", "credit_card"] : [],
       cardMode: "hosted_invoice",
+      pixInstallmentMode: "monthly_manual_payment",
+      pixAutomatic: false,
     });
   });
 
@@ -282,7 +287,7 @@ export function createCheckoutRouter(express, { environment, asaasClient, store 
     let persistedOrderId = null;
     let result;
     try {
-      if (payment.method === "credit_card" && !interestFreeInstallment(quote.totalCents, payment.installments)) {
+      if (payment.installments > 1 && !interestFreeInstallment(quote.totalCents, payment.installments)) {
         throw new CheckoutInputError("O parcelamento escolhido não está disponível.", "invalid_installments");
       }
 
@@ -315,6 +320,9 @@ export function createCheckoutRouter(express, { environment, asaasClient, store 
       await store.createOrder({
         provider: "asaas",
         providerOrderId: orderId,
+        providerGroupId: providerPayment?.installment
+          ? providerId(providerPayment.installment, "installment id")
+          : null,
         checkoutAttemptKey: quote.coupon ? key : null,
         status: asaasOrderStatus(updatedPayment?.status ?? providerPayment?.status),
         buyerEmail: buyer.email,
@@ -326,17 +334,20 @@ export function createCheckoutRouter(express, { environment, asaasClient, store 
       });
       couponReservationBound = Boolean(quote.coupon);
 
-      if (payment.method === "pix") {
+      if (payment.method === "pix" || payment.method === "pix_installment") {
         const pix = await asaasClient.getPixQrCode(orderId);
         if (typeof pix?.encodedImage !== "string" || typeof pix?.payload !== "string") {
           throw new Error("Asaas returned incomplete Pix instructions.");
         }
+        const installment = interestFreeInstallment(quote.totalCents, payment.installments);
         result = {
           status: 201,
           body: {
             orderId,
             status: asaasOrderStatus(updatedPayment?.status ?? providerPayment?.status),
-            method: "pix",
+            method: payment.method,
+            installments: payment.installments,
+            installmentCents: installment?.installmentCents ?? quote.totalCents,
             totalCents: quote.totalCents,
             pix: { qrCodeBase64: pix.encodedImage, emv: pix.payload, expiresAt: pix.expirationDate ?? null },
           },

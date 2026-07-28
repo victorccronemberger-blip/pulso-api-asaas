@@ -27,6 +27,7 @@ export function createAsaasWebhookHandler({ environment, store }) {
     const eventId = String(request.body?.id ?? "").trim();
     const payment = request.body?.payment;
     const orderId = paymentId(payment?.id);
+    const providerGroupId = paymentId(payment?.installment);
     const externalReference = String(payment?.externalReference ?? "").trim();
     if (
       !/^PAYMENT_[A-Z_]+$/.test(event)
@@ -42,6 +43,7 @@ export function createAsaasWebhookHandler({ environment, store }) {
       const persisted = await store.updateOrderFromWebhook({
         provider: "asaas",
         providerOrderId: orderId,
+        providerGroupId,
         status: asaasOrderStatus(payment?.status),
         eventId,
       });

@@ -61,6 +61,8 @@ test("reports a healthy API while keeping checkout disabled without Asaas creden
     environment: "sandbox",
     methods: [],
     cardMode: "hosted_invoice",
+    pixInstallmentMode: "monthly_manual_payment",
+    pixAutomatic: false,
   });
 });
 
@@ -134,6 +136,8 @@ test("creates a Pix charge from server-authoritative prices", async (context) =>
     orderId: "pay_pulso6001",
     status: "open",
     method: "pix",
+    installments: 1,
+    installmentCents: 125_255,
     totalCents: 125_255,
     pix: { qrCodeBase64: "aW1hZ2U=", emv: "000201PULSO", expiresAt: "2026-07-29" },
   });
@@ -153,6 +157,67 @@ test("creates a Pix charge from server-authoritative prices", async (context) =>
     description: "Novo CPA + Simulados Ancord 2026",
     externalReference: payment.externalReference,
   });
+});
+
+test("creates a finite Pix installment plan without increasing the customer total", async (context) => {
+  const calls = [];
+  const asaasClient = {
+    findCustomersByDocument: async () => ({ data: [{ id: "cus_pix_plan407" }] }),
+    createCustomer: async () => assert.fail("Existing customer must be reused"),
+    createPayment: async (payload) => {
+      calls.push(["payment", payload]);
+      return {
+        id: "pay_pixplan6003",
+        installment: "ins_pixplan6003",
+        status: "PENDING",
+        billingType: "PIX",
+        value: 324.35,
+        dueDate: "2026-07-29",
+        description: "Novo CPA",
+        externalReference: payload.externalReference,
+        invoiceUrl: "https://sandbox.asaas.com/i/6003",
+      };
+    },
+    updatePayment: async (id, payload) => {
+      calls.push(["update", id, payload]);
+      return { id, status: "PENDING", invoiceUrl: "https://sandbox.asaas.com/i/6003" };
+    },
+    getPixQrCode: async () => ({
+      encodedImage: "aW1hZ2U=",
+      payload: "000201PULSOPARCELADO",
+      expirationDate: "2026-07-29",
+    }),
+  };
+  const origin = await serve(context, enabledEnvironment, { asaasClient });
+  const response = await fetch(`${origin}/v1/checkout/orders`, {
+    method: "POST",
+    headers: requestHeaders(),
+    body: JSON.stringify({
+      slugs: ["novo-cpa"],
+      couponCode: "PULSO35",
+      buyer: buyer(),
+      payment: { method: "pix_installment", installments: 3 },
+    }),
+  });
+  assert.equal(response.status, 201);
+  assert.deepEqual(await response.json(), {
+    orderId: "pay_pixplan6003",
+    status: "open",
+    method: "pix_installment",
+    installments: 3,
+    installmentCents: 32_435,
+    totalCents: 97_305,
+    pix: {
+      qrCodeBase64: "aW1hZ2U=",
+      emv: "000201PULSOPARCELADO",
+      expiresAt: "2026-07-29",
+    },
+  });
+  const payment = calls.find(([name]) => name === "payment")[1];
+  assert.equal(payment.billingType, "PIX");
+  assert.equal(payment.installmentCount, 3);
+  assert.equal(payment.totalValue, 973.05);
+  assert.equal("value" in payment, false);
 });
 
 test("creates a ten-installment hosted Asaas invoice without receiving card data", async (context) => {
