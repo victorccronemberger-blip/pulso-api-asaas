@@ -1,8 +1,16 @@
+import { createHash } from "node:crypto";
 import { createApp } from "./application.js";
 
 const { app, environment, ready } = createApp();
 const server = app.listen(environment.port, environment.host, () => {
   console.log(`PULSO API listening on ${environment.host}:${environment.port}`);
+  if (environment.asaasApiKey) {
+    console.log("PULSO API provider credential loaded.", {
+      environment: environment.asaasEnvironment,
+      length: environment.asaasApiKey.length,
+      fingerprint: createHash("sha256").update(environment.asaasApiKey).digest("hex").slice(0, 12),
+    });
+  }
 });
 
 ready
