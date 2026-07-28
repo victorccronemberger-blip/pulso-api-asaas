@@ -48,14 +48,14 @@ test("quotes only eligible coupons and publishes the campaign without leaking ad
   assert.deepEqual(await campaign.json(), { campaign: { activeCouponCode: "CPA20", discountBps: 2000, headline: "Condi\u00e7\u00e3o de lan\u00e7amento" } });
 });
 
-test("persists checkout orders and applies coupon redemption once on an Appmax webhook", async (context) => {
+test("persists checkout orders and applies coupon redemption once on an Asaas webhook", async (context) => {
   const { store } = await api(context);
   const attemptKey = "a0000000-0000-4000-8000-000000000055";
   await store.reserveCoupon("PULSO35", attemptKey, []);
-  await store.createOrder({ appmaxOrderId: 55, checkoutAttemptKey: attemptKey, status: "open", buyerEmail: "buyer@example.test", couponCode: "PULSO35", subtotalCents: 1000, discountCents: 350, totalCents: 650, lines: [] });
-  await store.updateOrderFromWebhook({ appmaxOrderId: 55, status: "paid", eventId: "paid-55" });
-  await store.updateOrderFromWebhook({ appmaxOrderId: 55, status: "paid", eventId: "paid-55" });
-  await store.updateOrderFromWebhook({ appmaxOrderId: 55, status: "processing", eventId: "late-processing-55" });
+  await store.createOrder({ provider: "asaas", providerOrderId: "pay_55", checkoutAttemptKey: attemptKey, status: "open", buyerEmail: "buyer@example.test", couponCode: "PULSO35", subtotalCents: 1000, discountCents: 350, totalCents: 650, lines: [] });
+  await store.updateOrderFromWebhook({ provider: "asaas", providerOrderId: "pay_55", status: "paid", eventId: "paid-55" });
+  await store.updateOrderFromWebhook({ provider: "asaas", providerOrderId: "pay_55", status: "paid", eventId: "paid-55" });
+  await store.updateOrderFromWebhook({ provider: "asaas", providerOrderId: "pay_55", status: "processing", eventId: "late-processing-55" });
   const coupon = await store.getCoupon("PULSO35");
   assert.equal(coupon.redemptions, 1);
   assert.deepEqual(await store.overview(), {
@@ -94,10 +94,11 @@ test("production refuses the non-persistent fallback", () => {
 test("reconciles a paid webhook that arrives before local order enrichment", async () => {
   const store = createInMemoryStore();
   const attemptKey = "a0000000-0000-4000-8000-000000000088";
-  await store.updateOrderFromWebhook({ appmaxOrderId: 88, status: "paid", eventId: "paid-before-order-88" });
+  await store.updateOrderFromWebhook({ provider: "asaas", providerOrderId: "pay_88", status: "paid", eventId: "paid-before-order-88" });
   await store.reserveCoupon("PULSO35", attemptKey, []);
   await store.createOrder({
-    appmaxOrderId: 88,
+    provider: "asaas",
+    providerOrderId: "pay_88",
     checkoutAttemptKey: attemptKey,
     status: "created",
     buyerEmail: "buyer@example.test",
@@ -121,7 +122,7 @@ test("keeps pending checkout attempts fail-closed and allows only explicit safe 
   assert.equal((await store.beginCheckoutAttempt(key, "a".repeat(64))).kind, "new");
 });
 
-test("order status cannot regress when Appmax events arrive out of order", () => {
+test("order status cannot regress when gateway events arrive out of order", () => {
   assert.equal(resolveOrderStatus("processing", "created"), "processing");
   assert.equal(resolveOrderStatus("failed", "open"), "failed");
   assert.equal(resolveOrderStatus("failed", "paid"), "paid");

@@ -2,11 +2,8 @@ import cors from "cors";
 import express from "express";
 import helmet from "helmet";
 import { getEnvironment } from "./config/environment.js";
-import { createAppmaxClient } from "./integrations/appmax/client.js";
-import {
-  createAppmaxValidationHandler,
-  createAppmaxWebhookHandler,
-} from "./routes/appmax-integration.js";
+import { createAsaasClient } from "./integrations/asaas/client.js";
+import { createAsaasWebhookHandler } from "./routes/asaas-integration.js";
 import { createCheckoutRouter } from "./routes/checkout.js";
 import { createHealthRouter } from "./routes/health.js";
 import { createAdminRouter, createPublicCommerceRouter } from "./routes/admin.js";
@@ -18,7 +15,7 @@ export function createApp(overrides = {}, dependencies = {}) {
   if (environment.nodeEnvironment === "production" && !environment.mysqlUrl) {
     throw new Error("MYSQL_URL is required in production.");
   }
-  const appmaxClient = dependencies.appmaxClient ?? createAppmaxClient(environment);
+  const asaasClient = dependencies.asaasClient ?? createAsaasClient(environment);
   const store = dependencies.store ?? (environment.mysqlUrl ? createMySqlStore(environment.mysqlUrl) : createInMemoryStore());
   const app = express();
   const readiness = {
@@ -54,7 +51,7 @@ export function createApp(overrides = {}, dependencies = {}) {
   app.use(cors({
     origin: [environment.publicOrigin, environment.adminOrigin, environment.sitesOrigin],
     methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Accept", "Idempotency-Key", "X-CSRF-Token"],
+    allowedHeaders: ["Content-Type", "Accept", "Idempotency-Key", "X-CSRF-Token", "asaas-access-token"],
     credentials: true,
     maxAge: 86_400,
   }));
@@ -70,14 +67,10 @@ export function createApp(overrides = {}, dependencies = {}) {
     });
   });
   app.post(
-    "/v1/integrations/appmax/validate",
-    createAppmaxValidationHandler({ environment }),
+    "/v1/webhooks/asaas",
+    createAsaasWebhookHandler({ environment, store }),
   );
-  app.post(
-    "/v1/webhooks/appmax",
-    createAppmaxWebhookHandler({ environment, appmaxClient, store }),
-  );
-  app.use("/v1/checkout", createCheckoutRouter(express, { environment, appmaxClient, store }));
+  app.use("/v1/checkout", createCheckoutRouter(express, { environment, asaasClient, store }));
   app.use("/v1/admin", createAdminRouter(express, { environment, store }));
   app.use("/v1/public", createPublicCommerceRouter(express, { store }));
 
@@ -88,5 +81,5 @@ export function createApp(overrides = {}, dependencies = {}) {
     });
   });
 
-  return { app, environment, appmaxClient, store, readiness, ready, waitForReady };
+  return { app, environment, asaasClient, store, readiness, ready, waitForReady };
 }

@@ -7,19 +7,13 @@ import {
 import { CheckoutValidationError, createAuthoritativeQuote } from "../domain/quote.js";
 import { createFixedWindowLimiter } from "../http/fixed-window-limiter.js";
 
-const PAID_STATUSES = new Set([
-  "aprovado",
-  "integrado",
-  "pendente_integracao",
-  "pendente_integracao_em_analise",
-]);
-const FAILED_STATUSES = new Set(["cancelado", "recusado_por_risco"]);
-const REFUNDED_STATUSES = new Set(["estornado"]);
+const PAID_STATUSES = new Set(["RECEIVED", "CONFIRMED", "RECEIVED_IN_CASH"]);
+const FAILED_STATUSES = new Set(["OVERDUE"]);
+const REFUNDED_STATUSES = new Set(["REFUNDED", "REFUND_REQUESTED", "REFUND_IN_PROGRESS"]);
 const CHARGEBACK_STATUSES = new Set([
-  "chargeback",
-  "chargeback_em_analise",
-  "chargeback_ganho",
-  "chargeback_perdido",
+  "CHARGEBACK_REQUESTED",
+  "CHARGEBACK_DISPUTE",
+  "AWAITING_CHARGEBACK_REVERSAL",
 ]);
 
 class CheckoutInputError extends Error {
@@ -57,24 +51,18 @@ function parseBuyer(input, requestIp) {
     throw new CheckoutInputError("Não foi possível validar a conexão do comprador.", "invalid_customer_ip");
   }
   return {
-    firstName: cleanText(input.firstName, 2, 80, "Nome"),
-    lastName: cleanText(input.lastName, 2, 100, "Sobrenome"),
+    name: `${cleanText(input.firstName, 2, 80, "Nome")} ${cleanText(input.lastName, 2, 100, "Sobrenome")}`,
     email,
-    phone: cleanDigits(input.phone, 10, 13, "Telefone"),
-    documentNumber: cleanDigits(input.documentNumber, 11, 14, "CPF ou CNPJ"),
+    mobilePhone: cleanDigits(input.phone, 10, 13, "Telefone"),
+    cpfCnpj: cleanDigits(input.documentNumber, 11, 14, "CPF ou CNPJ"),
     ip,
   };
 }
 
 function parsePayment(input) {
   if (!input || typeof input !== "object") throw new CheckoutInputError("Meio de pagamento inválido.");
-  if (input.method === "pix") return { method: "pix" };
+  if (input.method === "pix") return { method: "pix", installments: 1 };
   if (input.method !== "credit_card") throw new CheckoutInputError("Meio de pagamento inválido.");
-
-  const token = String(input.token ?? "").trim();
-  if (!/^[A-Za-z0-9._-]{16,256}$/.test(token)) {
-    throw new CheckoutInputError("Token de cartão inválido.", "invalid_card_token");
-  }
   const installments = Number(input.installments);
   if (
     !Number.isSafeInteger(installments)
@@ -83,12 +71,7 @@ function parsePayment(input) {
   ) {
     throw new CheckoutInputError("Número de parcelas inválido.", "invalid_installments");
   }
-  return {
-    method: "credit_card",
-    token,
-    installments,
-    holderName: cleanText(input.holderName, 3, 120, "Nome no cartão"),
-  };
+  return { method: "credit_card", installments };
 }
 
 async function quoteFromBody(body, store) {
@@ -98,34 +81,22 @@ async function quoteFromBody(body, store) {
   const coupon = normalized && Array.isArray(slugs)
     ? await store?.getEligibleCoupon(normalized, [...new Set(slugs)])
     : null;
-  return createAuthoritativeQuote({
-    slugs,
-    couponCode,
-  }, store ? { coupon } : {});
+  return createAuthoritativeQuote({ slugs, couponCode }, store ? { coupon } : {});
 }
 
-function orderStatus(value) {
-  const status = String(value ?? "").trim().toLowerCase();
+export function asaasOrderStatus(value) {
+  const status = String(value ?? "").trim().toUpperCase();
   if (PAID_STATUSES.has(status)) return "paid";
-  if (status === "autorizado") return "processing";
-  if (status === "pendente") return "open";
+  if (status === "PENDING") return "open";
   if (FAILED_STATUSES.has(status)) return "failed";
   if (REFUNDED_STATUSES.has(status)) return "refunded";
   if (CHARGEBACK_STATUSES.has(status)) return "chargeback";
   return "processing";
 }
 
-function appmaxOrder(result) {
-  return result?.data?.order ?? result?.order ?? null;
-}
-
-function appmaxPayment(result) {
-  return result?.data?.payment ?? result?.payment ?? null;
-}
-
-function integerId(value, label) {
-  const id = Number(value);
-  if (!Number.isSafeInteger(id) || id < 1) throw new Error(`Appmax returned no ${label}.`);
+function providerId(value, label = "payment id") {
+  const id = String(value ?? "").trim();
+  if (!/^[A-Za-z0-9_-]{6,80}$/.test(id)) throw new Error(`Asaas returned no ${label}.`);
   return id;
 }
 
@@ -149,12 +120,54 @@ function handleInputError(error, response) {
   return false;
 }
 
-export function createCheckoutRouter(express, { environment, appmaxClient, store }) {
+function amount(cents) {
+  return Number((cents / 100).toFixed(2));
+}
+
+function dueDate() {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() + 1);
+  return date.toISOString().slice(0, 10);
+}
+
+async function findOrCreateCustomer(asaasClient, buyer, key) {
+  const existing = await asaasClient.findCustomersByDocument(buyer.cpfCnpj);
+  const match = Array.isArray(existing?.data) ? existing.data.find((customer) => customer?.id) : null;
+  if (match) return providerId(match.id, "customer id");
+  const created = await asaasClient.createCustomer({
+    name: buyer.name,
+    cpfCnpj: buyer.cpfCnpj,
+    email: buyer.email,
+    mobilePhone: buyer.mobilePhone,
+    externalReference: `pulso-customer:${key}`,
+  });
+  return providerId(created?.id, "customer id");
+}
+
+function paymentPayload({ customerId, quote, payment, key }) {
+  const payload = {
+    customer: customerId,
+    billingType: payment.method === "pix" ? "PIX" : "CREDIT_CARD",
+    dueDate: dueDate(),
+    description: quote.lines.map((line) => line.product.title).join(" + ").slice(0, 500),
+    externalReference: `pulso:${key}`,
+  };
+  if (payment.method === "credit_card" && payment.installments > 1) {
+    return {
+      ...payload,
+      installmentCount: payment.installments,
+      totalValue: amount(quote.totalCents),
+    };
+  }
+  return { ...payload, value: amount(quote.totalCents) };
+}
+
+export function createCheckoutRouter(express, { environment, asaasClient, store }) {
   const router = express.Router();
   const limiter = createFixedWindowLimiter();
 
   function requireProvider(response) {
-    if (environment.checkoutEnabled && appmaxClient) return true;
+    if (environment.checkoutEnabled && asaasClient) return true;
     response.status(503).json({
       error: "checkout_unavailable",
       message: "A conta de pagamentos ainda precisa ser conectada.",
@@ -165,10 +178,10 @@ export function createCheckoutRouter(express, { environment, appmaxClient, store
   router.get("/status", (_request, response) => {
     response.json({
       enabled: environment.checkoutEnabled,
-      provider: "appmax",
-      environment: environment.appmaxEnvironment,
-      externalId: environment.checkoutEnabled ? environment.appmaxExternalId : null,
+      provider: "asaas",
+      environment: environment.asaasEnvironment,
       methods: environment.checkoutEnabled ? ["pix", "credit_card"] : [],
+      cardMode: "hosted_invoice",
     });
   });
 
@@ -181,7 +194,6 @@ export function createCheckoutRouter(express, { environment, appmaxClient, store
       if (handleInputError(error, response)) return;
       throw error;
     }
-
     response.json({
       baseTotalCents: quote.totalCents,
       maximumInstallments: MAX_INTEREST_FREE_INSTALLMENTS,
@@ -218,9 +230,10 @@ export function createCheckoutRouter(express, { environment, appmaxClient, store
       return;
     }
     if (attempt.kind === "pending") {
-      response.status(409).json({ error: "idempotency_in_progress", message: "Esta tentativa ainda est\u00e1 sendo processada." });
+      response.status(409).json({ error: "idempotency_in_progress", message: "Esta tentativa ainda está sendo processada." });
       return;
     }
+
     if (quote.coupon) {
       const reserved = await store.reserveCoupon(
         quote.coupon.code,
@@ -228,7 +241,7 @@ export function createCheckoutRouter(express, { environment, appmaxClient, store
         quote.lines.map((line) => line.product.slug),
       );
       if (!reserved) {
-        const result = { status: 400, body: { error: "invalid_coupon", message: "Cupom inv\u00e1lido ou indispon\u00edvel.", retryable: true } };
+        const result = { status: 400, body: { error: "invalid_coupon", message: "Cupom inválido ou indisponível.", retryable: true } };
         await store.abandonCheckoutAttempt(key);
         response.status(result.status).json(result.body);
         return;
@@ -236,194 +249,139 @@ export function createCheckoutRouter(express, { environment, appmaxClient, store
       quote = createAuthoritativeQuote({ slugs: request.body?.slugs, couponCode: quote.coupon.code }, { coupon: reserved });
     }
 
-    const promise = (async () => {
-      let couponReservationBound = false;
-      let persistedOrderId = null;
+    let couponReservationBound = false;
+    let persistedOrderId = null;
+    let result;
+    try {
+      if (payment.method === "credit_card" && !interestFreeInstallment(quote.totalCents, payment.installments)) {
+        throw new CheckoutInputError("O parcelamento escolhido não está disponível.", "invalid_installments");
+      }
+
+      const customerId = await findOrCreateCustomer(asaasClient, buyer, key);
+      const providerPayment = await asaasClient.createPayment(paymentPayload({
+        customerId,
+        quote,
+        payment,
+        key,
+      }));
+      const orderId = providerId(providerPayment?.id);
+      persistedOrderId = orderId;
+
+      const successUrl = `${environment.publicOrigin}/checkout/sucesso/?order_id=${encodeURIComponent(orderId)}`;
+      let updatedPayment = providerPayment;
       try {
-        let chargedTotalCents = quote.totalCents;
-        if (payment.method === "credit_card") {
-          const chosen = interestFreeInstallment(quote.totalCents, payment.installments);
-          if (!chosen) {
-            if (quote.coupon) await store.releaseCouponReservation(key);
-            await store.abandonCheckoutAttempt(key);
-            return {
-              status: 400,
-              body: {
-                error: "invalid_installments",
-                message: "O parcelamento escolhido não está disponível.",
-                retryable: true,
-              },
-            };
-          }
-          chargedTotalCents = chosen.totalCents;
+        updatedPayment = await asaasClient.updatePayment(orderId, {
+          callback: { successUrl },
+        });
+      } catch (callbackError) {
+        console.error("Could not configure the Asaas return URL", {
+          orderId,
+          status: callbackError?.status,
+          code: callbackError?.code,
+        });
+      }
+      const invoiceUrl = String(updatedPayment?.invoiceUrl ?? providerPayment?.invoiceUrl ?? "").trim();
+
+      await store.createOrder({
+        provider: "asaas",
+        providerOrderId: orderId,
+        checkoutAttemptKey: quote.coupon ? key : null,
+        status: asaasOrderStatus(updatedPayment?.status ?? providerPayment?.status),
+        buyerEmail: buyer.email,
+        couponCode: quote.coupon?.code ?? null,
+        subtotalCents: quote.subtotalCents,
+        discountCents: quote.discountCents,
+        totalCents: quote.totalCents,
+        lines: quote.lines,
+      });
+      couponReservationBound = Boolean(quote.coupon);
+
+      if (payment.method === "pix") {
+        const pix = await asaasClient.getPixQrCode(orderId);
+        if (typeof pix?.encodedImage !== "string" || typeof pix?.payload !== "string") {
+          throw new Error("Asaas returned incomplete Pix instructions.");
         }
-
-        const customerResult = await appmaxClient.createCustomer({
-          first_name: buyer.firstName,
-          last_name: buyer.lastName,
-          email: buyer.email,
-          phone: buyer.phone,
-          document_number: buyer.documentNumber,
-          ip: buyer.ip,
-        });
-        const customerId = integerId(
-          customerResult?.data?.customer?.id ?? customerResult?.customer?.id,
-          "customer id",
-        );
-
-        const products = quote.lines.map((line) => ({
-          sku: line.product.slug,
-          name: line.product.title,
-          quantity: 1,
-          type: "digital",
-          unit_value: line.finalPriceCents,
-        }));
-        const orderResult = await appmaxClient.createOrder({
-          customer_id: customerId,
-          products,
-        });
-        const order = appmaxOrder(orderResult);
-        const orderId = integerId(order?.id, "order id");
-        await store?.createOrder({
-          appmaxOrderId: orderId,
-          checkoutAttemptKey: quote.coupon ? key : null,
-          status: "created",
-          buyerEmail: buyer.email,
-          couponCode: quote.coupon?.code ?? null,
-          subtotalCents: quote.subtotalCents,
-          discountCents: quote.discountCents,
-          totalCents: chargedTotalCents,
-          lines: quote.lines,
-        });
-        persistedOrderId = orderId;
-        couponReservationBound = Boolean(quote.coupon);
-        if (payment.method === "pix") {
-          const pixResult = await appmaxClient.createPixPayment({
-            order_id: orderId,
-            payment_data: { pix: { document_number: buyer.documentNumber } },
-          });
-          const pix = appmaxPayment(pixResult);
-          if (typeof pix?.pix_qrcode !== "string" || typeof pix?.pix_emv !== "string") {
-            throw new Error("Appmax returned incomplete Pix instructions.");
-          }
-          const result = {
-            status: 201,
-            body: {
-              orderId,
-              status: orderStatus(appmaxOrder(pixResult)?.status ?? order?.status),
-              method: "pix",
-              totalCents: chargedTotalCents,
-              pix: { qrCodeBase64: pix.pix_qrcode, emv: pix.pix_emv },
-            },
-          };
-          try {
-            await store?.updateOrderFromWebhook({
-              appmaxOrderId: orderId,
-              status: result.body.status,
-            });
-          } catch (persistenceError) {
-            console.error("Could not update the local Pix order", {
-              orderId,
-              type: persistenceError?.name,
-            });
-          }
-          return result;
-        }
-
-        const cardResult = await appmaxClient.createCardPayment({
-          order_id: orderId,
-          customer_id: customerId,
-          payment_data: {
-            credit_card: {
-              token: payment.token,
-              holder_document_number: buyer.documentNumber,
-              holder_name: payment.holderName,
-              installments: payment.installments,
-              soft_descriptor: environment.appmaxSoftDescriptor,
-            },
-          },
-        });
-        const result = {
+        result = {
           status: 201,
           body: {
             orderId,
-            status: orderStatus(appmaxOrder(cardResult)?.status ?? order?.status),
-            method: "credit_card",
-            installments: payment.installments,
-            totalCents: chargedTotalCents,
+            status: asaasOrderStatus(updatedPayment?.status ?? providerPayment?.status),
+            method: "pix",
+            totalCents: quote.totalCents,
+            pix: { qrCodeBase64: pix.encodedImage, emv: pix.payload, expiresAt: pix.expirationDate ?? null },
           },
         };
-        try {
-          await store?.updateOrderFromWebhook({
-            appmaxOrderId: orderId,
-            status: result.body.status,
-          });
-        } catch (persistenceError) {
-          console.error("Could not update the local card order", {
+      } else {
+        if (!/^https:\/\/(?:www\.)?asaas\.com\//i.test(invoiceUrl) && !/^https:\/\/sandbox\.asaas\.com\//i.test(invoiceUrl)) {
+          throw new Error("Asaas returned no secure invoice URL.");
+        }
+        result = {
+          status: 201,
+          body: {
             orderId,
-            type: persistenceError?.name,
-          });
-        }
-        return result;
-      } catch (error) {
-        if (quote.coupon && !couponReservationBound) {
-          await store.releaseCouponReservation(key);
-        }
-        if (!persistedOrderId) {
-          await store.abandonCheckoutAttempt(key);
-        }
-        console.error("Appmax checkout failed", {
+            status: asaasOrderStatus(updatedPayment?.status ?? providerPayment?.status),
+            method: "credit_card",
+            installments: payment.installments,
+            totalCents: quote.totalCents,
+            redirectUrl: invoiceUrl,
+          },
+        };
+      }
+    } catch (error) {
+      if (error instanceof CheckoutInputError) {
+        if (quote.coupon) await store.releaseCouponReservation(key);
+        await store.abandonCheckoutAttempt(key);
+        result = { status: 400, body: { error: error.code, message: error.message, retryable: true } };
+      } else {
+        if (quote.coupon && !couponReservationBound) await store.releaseCouponReservation(key);
+        if (!persistedOrderId) await store.abandonCheckoutAttempt(key);
+        console.error("Asaas checkout failed", {
           endpoint: error?.endpoint,
           status: error?.status,
+          code: error?.code,
           type: error?.name,
         });
-        return persistedOrderId ? {
+        result = persistedOrderId ? {
           status: 202,
           body: {
             orderId: persistedOrderId,
             status: "processing",
             method: payment.method,
             totalCents: quote.totalCents,
-            message: "Pedido recebido e em reconciliação com a Appmax.",
+            message: "Pedido recebido e em reconciliação com a Asaas.",
           },
         } : {
           status: 502,
           body: {
             error: "checkout_provider_error",
-            message: "O pagamento não pôde ser processado. Revise os dados e tente novamente.",
+            message: error?.retryable
+              ? "A Asaas está temporariamente indisponível. Tente novamente."
+              : "O pagamento não pôde ser criado. Revise os dados e tente novamente.",
             retryable: true,
           },
         };
       }
-    })();
+    }
 
-    const result = await promise;
     await store.completeCheckoutAttempt(key, result);
     response.status(result.status).json(result.body);
   });
 
   router.get("/orders/:orderId", limiter, async (request, response) => {
     if (!requireProvider(response)) return;
-    if (!/^[1-9]\d{0,15}$/.test(request.params.orderId)) {
-      response.status(400).json({ error: "invalid_order", message: "Pedido inválido." });
-      return;
-    }
-
+    let orderId;
     try {
-      const result = await appmaxClient.getOrder(request.params.orderId);
-      const order = appmaxOrder(result);
-      response.json({
-        id: integerId(order?.id ?? request.params.orderId, "order id"),
-        status: orderStatus(order?.status),
-      });
+      orderId = providerId(request.params.orderId);
+      const payment = await asaasClient.getPayment(orderId);
+      response.json({ id: providerId(payment?.id ?? orderId), status: asaasOrderStatus(payment?.status) });
     } catch (error) {
-      console.error("Appmax order retrieval failed", {
+      console.error("Asaas payment retrieval failed", {
         endpoint: error?.endpoint,
         status: error?.status,
       });
       response.status(error?.status === 404 ? 404 : 502).json({
         error: "order_not_found",
-        message: "Não encontramos este pedido na Appmax.",
+        message: "Não encontramos este pedido na Asaas.",
       });
     }
   });

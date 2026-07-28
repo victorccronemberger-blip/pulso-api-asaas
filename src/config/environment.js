@@ -10,15 +10,6 @@ function parsePort(value) {
   return port;
 }
 
-function parseOptionalInteger(value) {
-  if (value === undefined || value === null || String(value).trim() === "") return null;
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < 1) {
-    throw new Error("APPMAX_APP_NUMERICAL_ID must be a positive integer.");
-  }
-  return parsed;
-}
-
 function parsePositiveInteger(value, fallback, name) {
   const parsed = value === undefined || value === null || value === "" ? fallback : Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error(`${name} must be a positive integer.`);
@@ -28,23 +19,17 @@ function parsePositiveInteger(value, fallback, name) {
 function parseEnvironment(value) {
   const environment = String(value ?? "sandbox").trim().toLowerCase();
   if (!["sandbox", "production"].includes(environment)) {
-    throw new Error("APPMAX_ENVIRONMENT must be sandbox or production.");
+    throw new Error("ASAAS_ENVIRONMENT must be sandbox or production.");
   }
   return environment;
 }
 
 export function getEnvironment(source = process.env) {
-  const appmaxEnvironment = parseEnvironment(source.APPMAX_ENVIRONMENT);
-  const appmaxMerchantClientId = source.APPMAX_MERCHANT_CLIENT_ID?.trim() || null;
-  const appmaxMerchantClientSecret = source.APPMAX_MERCHANT_CLIENT_SECRET?.trim() || null;
-  const appmaxExternalId = source.APPMAX_EXTERNAL_ID?.trim()
-    || "8623e65e-2ddf-4ec0-87f0-aff3bc26a6aa";
-  const appmaxRequested = parseBoolean(source.APPMAX_ENABLED ?? "false");
-  const appmaxAvailable = Boolean(
-    appmaxMerchantClientId
-    && appmaxMerchantClientSecret
-    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(appmaxExternalId),
-  );
+  const asaasEnvironment = parseEnvironment(source.ASAAS_ENVIRONMENT);
+  const asaasApiKey = source.ASAAS_API_KEY?.trim() || null;
+  const asaasWebhookToken = source.ASAAS_WEBHOOK_TOKEN?.trim() || null;
+  const asaasRequested = parseBoolean(source.ASAAS_ENABLED ?? "false");
+  const asaasAvailable = Boolean(asaasApiKey);
 
   return Object.freeze({
     nodeEnvironment: source.NODE_ENV?.trim().toLowerCase() || "development",
@@ -57,24 +42,13 @@ export function getEnvironment(source = process.env) {
     adminBootstrapToken: source.ADMIN_BOOTSTRAP_TOKEN?.trim() || null,
     sessionPepper: source.SESSION_PEPPER?.trim() || null,
     sessionTtlSeconds: parsePositiveInteger(source.ADMIN_SESSION_TTL_SECONDS, 28_800, "ADMIN_SESSION_TTL_SECONDS"),
-    appmaxWebhookSecret: source.APPMAX_WEBHOOK_SECRET?.trim() || null,
-    appmaxEnvironment,
-    appmaxAuthOrigin: appmaxEnvironment === "production"
-      ? "https://auth.appmax.com.br"
-      : "https://auth.sandboxappmax.com.br",
-    appmaxApiOrigin: appmaxEnvironment === "production"
-      ? "https://api.appmax.com.br"
-      : "https://api.sandboxappmax.com.br",
-    appmaxMerchantClientId,
-    appmaxMerchantClientSecret,
-    appmaxExternalId,
-    appmaxAppUuid: source.APPMAX_APP_UUID?.trim() || null,
-    appmaxAppNumericalId: parseOptionalInteger(source.APPMAX_APP_NUMERICAL_ID),
-    appmaxSoftDescriptor: (source.APPMAX_SOFT_DESCRIPTOR?.trim() || "PULSO")
-      .replace(/[^A-Za-z0-9]/g, "")
-      .slice(0, 13)
-      .toUpperCase(),
-    appmaxAvailable,
-    checkoutEnabled: appmaxRequested && appmaxAvailable,
+    asaasEnvironment,
+    asaasApiOrigin: asaasEnvironment === "production"
+      ? "https://api.asaas.com/v3"
+      : "https://api-sandbox.asaas.com/v3",
+    asaasApiKey,
+    asaasWebhookToken,
+    asaasAvailable,
+    checkoutEnabled: asaasRequested && asaasAvailable,
   });
 }
