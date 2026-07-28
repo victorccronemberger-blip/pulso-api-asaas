@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createApp } from "./application.js";
 
-const { app, environment, ready } = createApp();
+const { app, environment, artIntegration, ready } = createApp();
 const server = app.listen(environment.port, environment.host, () => {
   console.log(`PULSO API listening on ${environment.host}:${environment.port}`);
   if (environment.asaasApiKey) {
@@ -32,6 +32,7 @@ function shutdown(signal) {
   server.close((error) => {
     process.exitCode = error ? 1 : 0;
   });
+  if (artIntegration) artIntegration.queue.shutdown();
 }
 
 process.once("SIGINT", () => shutdown("SIGINT"));

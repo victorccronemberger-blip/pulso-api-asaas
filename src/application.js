@@ -3,6 +3,7 @@ import express from "express";
 import helmet from "helmet";
 import { getEnvironment } from "./config/environment.js";
 import { createAsaasClient } from "./integrations/asaas/client.js";
+import { createArtIntegration } from "./integrations/art/index.js";
 import { createAsaasWebhookHandler } from "./routes/asaas-integration.js";
 import { createCheckoutRouter } from "./routes/checkout.js";
 import { createHealthRouter } from "./routes/health.js";
@@ -18,6 +19,13 @@ export function createApp(overrides = {}, dependencies = {}) {
   }
   const asaasClient = dependencies.asaasClient ?? createAsaasClient(environment);
   const store = dependencies.store ?? (environment.mysqlUrl ? createMySqlStore(environment.mysqlUrl) : createInMemoryStore());
+  const artIntegration = dependencies.artIntegration ?? createArtIntegration({ environment, store });
+  const onOrderPaid = artIntegration
+    ? async (orderId) => {
+        const order = await store.getOrderWithItems(orderId);
+        await artIntegration.queue.enqueueOrder(order);
+      }
+    : null;
   const app = express();
   const readiness = {
     status: "connecting",
@@ -34,6 +42,11 @@ export function createApp(overrides = {}, dependencies = {}) {
       readiness.error = error?.code || error?.name || "database_initialization_failed";
       throw error;
     });
+  if (artIntegration) {
+    ready.then(() => artIntegration.queue.start()).catch((error) => {
+      console.error("PULSO API enrollment queue failed to start.", { message: error?.message });
+    });
+  }
   const waitForReady = () => {
     if (readiness.status !== "connecting") return Promise.resolve();
     return new Promise((resolve) => {
@@ -69,11 +82,11 @@ export function createApp(overrides = {}, dependencies = {}) {
   });
   app.post(
     "/v1/webhooks/asaas",
-    createAsaasWebhookHandler({ environment, store }),
+    createAsaasWebhookHandler({ environment, store, onOrderPaid }),
   );
   app.use("/v1/checkout", createCheckoutRouter(express, { environment, asaasClient, store }));
   app.use("/v1/customer", createCustomerRouter(express, { environment, store }));
-  app.use("/v1/admin", createAdminRouter(express, { environment, store }));
+  app.use("/v1/admin", createAdminRouter(express, { environment, store, queue: artIntegration?.queue }));
   app.use("/v1/public", createPublicCommerceRouter(express, { store }));
 
   app.use((_request, response) => {
@@ -83,5 +96,5 @@ export function createApp(overrides = {}, dependencies = {}) {
     });
   });
 
-  return { app, environment, asaasClient, store, readiness, ready, waitForReady };
+  return { app, environment, asaasClient, store, artIntegration, readiness, ready, waitForReady };
 }

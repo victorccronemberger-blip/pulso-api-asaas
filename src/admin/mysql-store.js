@@ -8,6 +8,7 @@ const fromJson = (value, fallback = []) => {
 };
 const iso = (value) => value ? new Date(value).toISOString() : null;
 const coupon = (row) => row && ({ id: row.id, code: row.code, discountBps: row.discount_bps, active: Boolean(row.active), startsAt: iso(row.starts_at), endsAt: iso(row.ends_at), maxRedemptions: row.max_redemptions, productSlugs: fromJson(row.product_scope_json), redemptions: Number(row.redemptions ?? 0), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) });
+const enrollmentRow = (row) => row && ({ id: row.id, orderId: row.order_id, orderItemId: row.order_item_id, courseSlug: row.course_slug, sourceTag: row.source_tag, status: row.status, attempts: Number(row.attempts), idTurma: row.id_turma, turmaSelection: row.turma_selection, userId: row.user_id, result: fromJson(row.result_json, null), error: row.error, buyerEmail: row.buyer_email, buyerCpf: row.buyer_cpf, buyerName: row.buyer_name, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) });
 
 export function createMySqlStore(databaseUrl) {
   const pool = mysql.createPool({ uri: databaseUrl, timezone: "Z", dateStrings: true });
@@ -21,7 +22,7 @@ export function createMySqlStore(databaseUrl) {
         `CREATE TABLE IF NOT EXISTS customers (id CHAR(36) PRIMARY KEY, email VARCHAR(160) NOT NULL UNIQUE, display_name VARCHAR(120) NOT NULL, mobile_phone VARCHAR(16) NULL, document_last4 CHAR(4) NULL, password_salt VARCHAR(64) NOT NULL, password_hash VARCHAR(128) NOT NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3))`,
         `CREATE TABLE IF NOT EXISTS customer_sessions (id CHAR(36) PRIMARY KEY, customer_id CHAR(36) NOT NULL, token_hash CHAR(64) NOT NULL UNIQUE, csrf_hash CHAR(64) NOT NULL, expires_at DATETIME(3) NOT NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), INDEX customer_sessions_expiry (expires_at), CONSTRAINT customer_sessions_customer_fk FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE)`,
         `CREATE TABLE IF NOT EXISTS coupons (id CHAR(36) PRIMARY KEY, code VARCHAR(32) NOT NULL UNIQUE, discount_bps SMALLINT UNSIGNED NOT NULL, active TINYINT(1) NOT NULL DEFAULT 1, starts_at DATETIME(3) NULL, ends_at DATETIME(3) NULL, max_redemptions INT UNSIGNED NULL, product_scope_json JSON NOT NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3), INDEX coupons_active (active, starts_at, ends_at))`,
-        `CREATE TABLE IF NOT EXISTS orders (id CHAR(36) PRIMARY KEY, provider VARCHAR(24) NOT NULL, provider_order_id VARCHAR(80) NOT NULL, provider_group_id VARCHAR(80) NULL, status VARCHAR(32) NOT NULL, buyer_email VARCHAR(160) NULL, customer_id CHAR(36) NULL, payment_method VARCHAR(24) NULL, installments TINYINT UNSIGNED NULL, installment_cents INT UNSIGNED NULL, subtotal_cents INT UNSIGNED NOT NULL, discount_cents INT UNSIGNED NOT NULL, total_cents INT UNSIGNED NOT NULL, coupon_code VARCHAR(32) NULL, coupon_redeemed TINYINT(1) NOT NULL DEFAULT 0, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3), UNIQUE INDEX orders_provider_order (provider, provider_order_id), INDEX orders_provider_group (provider, provider_group_id), INDEX orders_status_updated (status, updated_at), INDEX orders_customer_updated (customer_id, updated_at))`,
+        `CREATE TABLE IF NOT EXISTS orders (id CHAR(36) PRIMARY KEY, provider VARCHAR(24) NOT NULL, provider_order_id VARCHAR(80) NOT NULL, provider_group_id VARCHAR(80) NULL, status VARCHAR(32) NOT NULL, buyer_email VARCHAR(160) NULL, buyer_cpf VARCHAR(14) NULL, buyer_name VARCHAR(180) NULL, buyer_phone VARCHAR(13) NULL, customer_id CHAR(36) NULL, payment_method VARCHAR(24) NULL, installments TINYINT UNSIGNED NULL, installment_cents INT UNSIGNED NULL, subtotal_cents INT UNSIGNED NOT NULL, discount_cents INT UNSIGNED NOT NULL, total_cents INT UNSIGNED NOT NULL, coupon_code VARCHAR(32) NULL, coupon_redeemed TINYINT(1) NOT NULL DEFAULT 0, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3), UNIQUE INDEX orders_provider_order (provider, provider_order_id), INDEX orders_provider_group (provider, provider_group_id), INDEX orders_status_updated (status, updated_at), INDEX orders_customer_updated (customer_id, updated_at))`,
         `CREATE TABLE IF NOT EXISTS order_items (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, order_id CHAR(36) NOT NULL, course_slug VARCHAR(80) NOT NULL, title VARCHAR(180) NOT NULL, base_price_cents INT UNSIGNED NOT NULL, discount_cents INT UNSIGNED NOT NULL, final_price_cents INT UNSIGNED NOT NULL, CONSTRAINT order_items_order_fk FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE)`,
         `CREATE TABLE IF NOT EXISTS coupon_redemptions (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, coupon_code VARCHAR(32) NOT NULL, order_id CHAR(36) NOT NULL UNIQUE, redeemed_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), INDEX coupon_redemptions_code (coupon_code))`,
         `CREATE TABLE IF NOT EXISTS coupon_reservations (attempt_key CHAR(36) PRIMARY KEY, coupon_code VARCHAR(32) NOT NULL, provider VARCHAR(24) NULL, provider_order_id VARCHAR(80) NULL, expires_at DATETIME(3) NOT NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), UNIQUE INDEX coupon_reservations_provider_order (provider, provider_order_id), INDEX coupon_reservations_code_expiry (coupon_code, expires_at))`,
@@ -29,6 +30,7 @@ export function createMySqlStore(databaseUrl) {
         `CREATE TABLE IF NOT EXISTS webhook_events (event_id VARCHAR(128) PRIMARY KEY, received_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3))`,
         `CREATE TABLE IF NOT EXISTS admin_audit_log (id CHAR(36) PRIMARY KEY, admin_id CHAR(36) NULL, action VARCHAR(80) NOT NULL, entity_type VARCHAR(80) NOT NULL, entity_id VARCHAR(80) NULL, metadata_json JSON NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), INDEX audit_created (created_at))`,
         `CREATE TABLE IF NOT EXISTS app_settings (setting_key VARCHAR(64) PRIMARY KEY, setting_value JSON NOT NULL, updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3))`,
+        `CREATE TABLE IF NOT EXISTS enrollments (id CHAR(36) PRIMARY KEY, order_id CHAR(36) NOT NULL, order_item_id BIGINT UNSIGNED NULL, course_slug VARCHAR(80) NOT NULL, source_tag VARCHAR(80) NOT NULL, status VARCHAR(24) NOT NULL DEFAULT 'queued', attempts INT UNSIGNED NOT NULL DEFAULT 0, id_turma INT NULL, turma_selection VARCHAR(40) NULL, user_id VARCHAR(80) NULL, result_json JSON NULL, error VARCHAR(512) NULL, buyer_email VARCHAR(160) NULL, buyer_cpf VARCHAR(14) NULL, buyer_name VARCHAR(180) NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3), UNIQUE INDEX enrollments_order_course (order_id, course_slug), INDEX enrollments_status (status, created_at), CONSTRAINT enrollments_order_fk FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE)`,
       ];
       for (const sql of statements) await pool.query(sql);
       const [orderColumns] = await pool.query("SHOW COLUMNS FROM orders");
@@ -36,7 +38,10 @@ export function createMySqlStore(databaseUrl) {
       if (!orderColumnNames.has("provider")) await pool.query("ALTER TABLE orders ADD COLUMN provider VARCHAR(24) NULL AFTER id");
       if (!orderColumnNames.has("provider_order_id")) await pool.query("ALTER TABLE orders ADD COLUMN provider_order_id VARCHAR(80) NULL AFTER provider");
       if (!orderColumnNames.has("provider_group_id")) await pool.query("ALTER TABLE orders ADD COLUMN provider_group_id VARCHAR(80) NULL AFTER provider_order_id");
-      if (!orderColumnNames.has("customer_id")) await pool.query("ALTER TABLE orders ADD COLUMN customer_id CHAR(36) NULL AFTER buyer_email");
+      if (!orderColumnNames.has("buyer_cpf")) await pool.query("ALTER TABLE orders ADD COLUMN buyer_cpf VARCHAR(14) NULL AFTER buyer_email");
+      if (!orderColumnNames.has("buyer_name")) await pool.query("ALTER TABLE orders ADD COLUMN buyer_name VARCHAR(180) NULL AFTER buyer_cpf");
+      if (!orderColumnNames.has("buyer_phone")) await pool.query("ALTER TABLE orders ADD COLUMN buyer_phone VARCHAR(13) NULL AFTER buyer_name");
+      if (!orderColumnNames.has("customer_id")) await pool.query("ALTER TABLE orders ADD COLUMN customer_id CHAR(36) NULL AFTER buyer_phone");
       if (!orderColumnNames.has("payment_method")) await pool.query("ALTER TABLE orders ADD COLUMN payment_method VARCHAR(24) NULL AFTER customer_id");
       if (!orderColumnNames.has("installments")) await pool.query("ALTER TABLE orders ADD COLUMN installments TINYINT UNSIGNED NULL AFTER payment_method");
       if (!orderColumnNames.has("installment_cents")) await pool.query("ALTER TABLE orders ADD COLUMN installment_cents INT UNSIGNED NULL AFTER installments");
@@ -117,14 +122,14 @@ export function createMySqlStore(databaseUrl) {
         const status = resolveOrderStatus(existing?.status, order.status);
         if (existing) {
           await connection.query(
-            "UPDATE orders SET provider_group_id=?,status=?,buyer_email=?,customer_id=?,payment_method=?,installments=?,installment_cents=?,subtotal_cents=?,discount_cents=?,total_cents=?,coupon_code=? WHERE id=?",
-            [order.providerGroupId ?? null, status, order.buyerEmail, order.customerId ?? null, order.paymentMethod ?? null, order.installments ?? null, order.installmentCents ?? null, order.subtotalCents, order.discountCents, order.totalCents, order.couponCode, orderId],
+            "UPDATE orders SET provider_group_id=?,status=?,buyer_email=?,buyer_cpf=?,buyer_name=?,buyer_phone=?,customer_id=?,payment_method=?,installments=?,installment_cents=?,subtotal_cents=?,discount_cents=?,total_cents=?,coupon_code=? WHERE id=?",
+            [order.providerGroupId ?? null, status, order.buyerEmail, order.buyerCpf ?? null, order.buyerName ?? null, order.buyerPhone ?? null, order.customerId ?? null, order.paymentMethod ?? null, order.installments ?? null, order.installmentCents ?? null, order.subtotalCents, order.discountCents, order.totalCents, order.couponCode, orderId],
           );
           await connection.query("DELETE FROM order_items WHERE order_id=?", [orderId]);
         } else {
           await connection.query(
-            "INSERT INTO orders (id,provider,provider_order_id,provider_group_id,status,buyer_email,customer_id,payment_method,installments,installment_cents,subtotal_cents,discount_cents,total_cents,coupon_code) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            [orderId, order.provider, order.providerOrderId, order.providerGroupId ?? null, status, order.buyerEmail, order.customerId ?? null, order.paymentMethod ?? null, order.installments ?? null, order.installmentCents ?? null, order.subtotalCents, order.discountCents, order.totalCents, order.couponCode],
+            "INSERT INTO orders (id,provider,provider_order_id,provider_group_id,status,buyer_email,buyer_cpf,buyer_name,buyer_phone,customer_id,payment_method,installments,installment_cents,subtotal_cents,discount_cents,total_cents,coupon_code) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [orderId, order.provider, order.providerOrderId, order.providerGroupId ?? null, status, order.buyerEmail, order.buyerCpf ?? null, order.buyerName ?? null, order.buyerPhone ?? null, order.customerId ?? null, order.paymentMethod ?? null, order.installments ?? null, order.installmentCents ?? null, order.subtotalCents, order.discountCents, order.totalCents, order.couponCode],
           );
         }
         for (const line of order.lines) {
@@ -176,6 +181,7 @@ export function createMySqlStore(databaseUrl) {
             [provider, providerGroupId],
           );
         }
+        const previousStatus = order?.status ?? null;
         if (!order) {
           const reconciledId = id();
           await connection.query(
@@ -210,7 +216,7 @@ export function createMySqlStore(databaseUrl) {
           );
         }
         await connection.commit();
-        return { id: order.id, status: nextStatus };
+        return { id: order.id, status: nextStatus, previousStatus };
       } catch (error) {
         await connection.rollback();
         throw error;
@@ -218,6 +224,26 @@ export function createMySqlStore(databaseUrl) {
         connection.release();
       }
     },
+    async getOrderWithItems(orderId) {
+      await ensureSchema();
+      const [[order]] = await pool.query("SELECT id,status,buyer_email,buyer_cpf,buyer_name,buyer_phone FROM orders WHERE id=?", [orderId]);
+      if (!order) return null;
+      const [items] = await pool.query("SELECT id,course_slug,title FROM order_items WHERE order_id=?", [orderId]);
+      return { id: order.id, status: order.status, buyerEmail: order.buyer_email, buyerCpf: order.buyer_cpf, buyerName: order.buyer_name, buyerPhone: order.buyer_phone, items: items.map((item) => ({ id: item.id, courseSlug: item.course_slug, title: item.title })) };
+    },
+    async createEnrollmentJob(job) {
+      await ensureSchema();
+      const value = { id: id(), ...job };
+      const [result] = await pool.query("INSERT IGNORE INTO enrollments (id,order_id,order_item_id,course_slug,source_tag,status,buyer_email,buyer_cpf,buyer_name) VALUES (?,?,?,?,?,'queued',?,?,?)", [value.id, value.orderId, value.orderItemId ?? null, value.courseSlug, value.sourceTag, value.buyerEmail ?? null, value.buyerCpf ?? null, value.buyerName ?? null]);
+      return result.affectedRows > 0 ? value.id : null;
+    },
+    async listPendingEnrollmentJobs() { await ensureSchema(); const [rows] = await pool.query("SELECT * FROM enrollments WHERE status='queued' ORDER BY created_at ASC"); return rows.map(enrollmentRow); },
+    async claimEnrollmentJob(enrollmentId) { await ensureSchema(); const [result] = await pool.query("UPDATE enrollments SET status='processing', attempts=attempts+1 WHERE id=? AND status='queued'", [enrollmentId]); return result.affectedRows > 0; },
+    async finishEnrollmentJob(enrollmentId, patch) { await ensureSchema(); await pool.query("UPDATE enrollments SET status=?, id_turma=?, turma_selection=?, user_id=?, result_json=?, error=? WHERE id=?", [patch.status, patch.idTurma ?? null, patch.turmaSelection ?? null, patch.userId ?? null, JSON.stringify(patch.result ?? null), patch.error ?? null, enrollmentId]); },
+    async requeueEnrollmentJob(enrollmentId) { await ensureSchema(); const [result] = await pool.query("UPDATE enrollments SET status='queued', error=NULL WHERE id=? AND status IN ('failed','not_created','pending')", [enrollmentId]); return result.affectedRows > 0; },
+    async recoverStaleEnrollments() { await ensureSchema(); const [result] = await pool.query("UPDATE enrollments SET status='queued' WHERE status='processing'"); return result.affectedRows; },
+    async listEnrollmentJobs({ limit = 50, status } = {}) { await ensureSchema(); const [rows] = await pool.query(`SELECT * FROM enrollments ${status ? "WHERE status=?" : ""} ORDER BY created_at DESC LIMIT ?`, status ? [status, limit] : [limit]); return rows.map(enrollmentRow); },
+    async getEnrollmentJob(enrollmentId) { await ensureSchema(); const [[row]] = await pool.query("SELECT * FROM enrollments WHERE id=?", [enrollmentId]); return enrollmentRow(row); },
     async getCampaign() { await ensureSchema(); const [[row]]=await pool.query("SELECT setting_value FROM app_settings WHERE setting_key='campaign'"); return fromJson(row?.setting_value, {activeCouponCode:null,headline:null}); },
     async saveCampaign(value) { await ensureSchema(); const next={...(await this.getCampaign()),...value}; await pool.query("INSERT INTO app_settings (setting_key,setting_value) VALUES ('campaign',?) ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)",[asJson(next)]); return next; },
     async audit(entry) { await ensureSchema(); await pool.query("INSERT INTO admin_audit_log (id,admin_id,action,entity_type,entity_id,metadata_json) VALUES (?,?,?,?,?,?)",[id(),entry.adminId??null,entry.action,entry.entityType,entry.entityId??null,JSON.stringify(entry.metadata??{})]); },
