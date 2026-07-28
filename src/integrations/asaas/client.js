@@ -70,5 +70,8 @@ export function createAsaasClient(environment, fetchImplementation = fetch) {
     updatePayment: (paymentId, payload) => request(`/payments/${encodeURIComponent(paymentId)}`, { method: "PUT", body: payload }),
     getPayment: (paymentId) => request(`/payments/${encodeURIComponent(paymentId)}`),
     getPixQrCode: (paymentId) => request(`/payments/${encodeURIComponent(paymentId)}/pixQrCode`),
+    listInstallmentPayments: (installmentId) => request(
+      `/installments/${encodeURIComponent(installmentId)}/payments?limit=100`,
+    ),
   });
 }

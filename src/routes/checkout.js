@@ -8,15 +8,8 @@ import {
 import { CheckoutValidationError, createAuthoritativeQuote } from "../domain/quote.js";
 import { createFixedWindowLimiter } from "../http/fixed-window-limiter.js";
 import { customerSessionFromRequest } from "../customer/session.js";
-
-const PAID_STATUSES = new Set(["RECEIVED", "CONFIRMED", "RECEIVED_IN_CASH"]);
-const FAILED_STATUSES = new Set(["OVERDUE"]);
-const REFUNDED_STATUSES = new Set(["REFUNDED", "REFUND_REQUESTED", "REFUND_IN_PROGRESS"]);
-const CHARGEBACK_STATUSES = new Set([
-  "CHARGEBACK_REQUESTED",
-  "CHARGEBACK_DISPUTE",
-  "AWAITING_CHARGEBACK_REVERSAL",
-]);
+import { normalizeAsaasPaymentStatus } from "../domain/payment-status.js";
+import { providerId, safeAsaasInvoiceUrl } from "../domain/provider-values.js";
 
 class CheckoutInputError extends Error {
   constructor(message, code = "invalid_checkout") {
@@ -89,22 +82,6 @@ async function quoteFromBody(body, store) {
     ? await store?.getEligibleCoupon(normalized, [...new Set(slugs)])
     : null;
   return createAuthoritativeQuote({ slugs, couponCode }, store ? { coupon } : {});
-}
-
-export function asaasOrderStatus(value) {
-  const status = String(value ?? "").trim().toUpperCase();
-  if (PAID_STATUSES.has(status)) return "paid";
-  if (status === "PENDING") return "open";
-  if (FAILED_STATUSES.has(status)) return "failed";
-  if (REFUNDED_STATUSES.has(status)) return "refunded";
-  if (CHARGEBACK_STATUSES.has(status)) return "chargeback";
-  return "processing";
-}
-
-function providerId(value, label = "payment id") {
-  const id = String(value ?? "").trim();
-  if (!/^[A-Za-z0-9_-]{6,80}$/.test(id)) throw new Error(`Asaas returned no ${label}.`);
-  return id;
 }
 
 function checkoutFingerprint(body, customerId) {
@@ -199,7 +176,12 @@ function paymentCallbackPayload(providerPayment, successUrl) {
   return payload;
 }
 
-export function createCheckoutRouter(express, { environment, asaasClient, store }) {
+export function createCheckoutRouter(express, {
+  environment,
+  asaasClient,
+  installmentService,
+  store,
+}) {
   const router = express.Router();
   const limiter = createFixedWindowLimiter();
 
@@ -234,12 +216,21 @@ export function createCheckoutRouter(express, { environment, asaasClient, store 
       if (handleInputError(error, response)) return;
       throw error;
     }
+    const cardInstallments = createInterestFreeInstallments(quote.totalCents);
+    const pixInstallments = createInterestFreeInstallments(quote.totalCents, {
+      maximum: MAX_PIX_INSTALLMENTS,
+    })
+      .filter((option) => option.number >= 2)
+      .map(({ interestFree: _interestFree, ...option }) => option);
     response.json({
       baseTotalCents: quote.totalCents,
       maximumInstallments: MAX_INTEREST_FREE_INSTALLMENTS,
       maximumPixInstallments: MAX_PIX_INSTALLMENTS,
-      interestFree: true,
-      installments: createInterestFreeInstallments(quote.totalCents),
+      cardInterestFree: true,
+      pixTotalPreserved: true,
+      installments: cardInstallments,
+      cardInstallments,
+      pixInstallments,
     });
   });
 
@@ -351,14 +342,14 @@ export function createCheckoutRouter(express, { environment, asaasClient, store 
       }
       const invoiceUrl = String(updatedPayment?.invoiceUrl ?? providerPayment?.invoiceUrl ?? "").trim();
 
-      await store.createOrder({
+      const localOrder = await store.createOrder({
         provider: "asaas",
         providerOrderId: orderId,
         providerGroupId: providerPayment?.installment
           ? providerId(providerPayment.installment, "installment id")
           : null,
         checkoutAttemptKey: quote.coupon ? key : null,
-        status: asaasOrderStatus(updatedPayment?.status ?? providerPayment?.status),
+        status: normalizeAsaasPaymentStatus(updatedPayment?.status ?? providerPayment?.status),
         buyerEmail: buyer.email,
         buyerCpf: buyer.cpfCnpj,
         buyerName: buyer.name,
@@ -374,6 +365,17 @@ export function createCheckoutRouter(express, { environment, asaasClient, store 
         lines: quote.lines,
       });
       couponReservationBound = Boolean(quote.coupon);
+      if (payment.method === "pix_installment") {
+        try {
+          await installmentService?.sync(localOrder);
+        } catch (syncError) {
+          console.error("Could not synchronize the new Asaas installment plan", {
+            orderId,
+            code: syncError?.code,
+            type: syncError?.name,
+          });
+        }
+      }
 
       if (payment.method === "pix" || payment.method === "pix_installment") {
         const pix = await asaasClient.getPixQrCode(orderId);
@@ -384,7 +386,7 @@ export function createCheckoutRouter(express, { environment, asaasClient, store 
           status: 201,
           body: {
             orderId,
-            status: asaasOrderStatus(updatedPayment?.status ?? providerPayment?.status),
+            status: normalizeAsaasPaymentStatus(updatedPayment?.status ?? providerPayment?.status),
             method: payment.method,
             installments: payment.installments,
             installmentCents: installment?.installmentCents ?? quote.totalCents,
@@ -393,18 +395,19 @@ export function createCheckoutRouter(express, { environment, asaasClient, store 
           },
         };
       } else {
-        if (!/^https:\/\/(?:www\.)?asaas\.com\//i.test(invoiceUrl) && !/^https:\/\/sandbox\.asaas\.com\//i.test(invoiceUrl)) {
+        const secureInvoiceUrl = safeAsaasInvoiceUrl(invoiceUrl);
+        if (!secureInvoiceUrl) {
           throw new Error("Asaas returned no secure invoice URL.");
         }
         result = {
           status: 201,
           body: {
             orderId,
-            status: asaasOrderStatus(updatedPayment?.status ?? providerPayment?.status),
+            status: normalizeAsaasPaymentStatus(updatedPayment?.status ?? providerPayment?.status),
             method: "credit_card",
             installments: payment.installments,
             totalCents: quote.totalCents,
-            redirectUrl: invoiceUrl,
+            redirectUrl: secureInvoiceUrl,
           },
         };
       }
@@ -454,7 +457,7 @@ export function createCheckoutRouter(express, { environment, asaasClient, store 
     try {
       orderId = providerId(request.params.orderId);
       const payment = await asaasClient.getPayment(orderId);
-      response.json({ id: providerId(payment?.id ?? orderId), status: asaasOrderStatus(payment?.status) });
+      response.json({ id: providerId(payment?.id ?? orderId), status: normalizeAsaasPaymentStatus(payment?.status) });
     } catch (error) {
       console.error("Asaas payment retrieval failed", {
         endpoint: error?.endpoint,
