@@ -1,6 +1,7 @@
 import { randomToken, tokenHash, hashPassword, parseCookies, safeEqual, serializeCookie, verifyPassword } from "../admin/security.js";
 import { validateCampaign, validateCoupon, validateCredentials } from "../admin/validation.js";
 import { createAuthoritativeQuote, CheckoutValidationError } from "../domain/quote.js";
+import { adminCatalog } from "../domain/catalog.js";
 import { normalizeCouponCode } from "../domain/coupons.js";
 import { createFixedWindowLimiter } from "../http/fixed-window-limiter.js";
 
@@ -55,6 +56,7 @@ export function createAdminRouter(express, { environment, store }) {
   }));
   router.post("/logout", requireAdmin, requireCsrf, async (request, response) => { await store.revokeSession(tokenHash(request.adminSessionToken, environment.sessionPepper)); await audit(request, "admin.logout", "session", null); clearCookies(response); response.status(204).end(); });
   router.get("/coupons", requireAdmin, async (_request, response) => response.json({ coupons: await store.listCoupons() }));
+  router.get("/products", requireAdmin, (_request, response) => response.json({ products: adminCatalog }));
   router.post("/coupons", requireAdmin, requireCsrf, async (request, response) => { try { const value = validateCoupon(request.body); if (await store.getCoupon(value.code)) return response.status(409).json({ error: "coupon_exists" }); const saved = await store.saveCoupon(value); await audit(request, "coupon.create", "coupon", saved.code); return response.status(201).json({ coupon: saved }); } catch (error) { return response.status(400).json({ error: "invalid_coupon", message: error.message }); } });
   router.patch("/coupons/:code", requireAdmin, requireCsrf, async (request, response) => { const current = await store.getCoupon(normalizeCouponCode(request.params.code)); if (!current) return response.status(404).json({ error: "coupon_not_found" }); try { const saved = await store.saveCoupon(validateCoupon({ ...request.body, code: current.code }, current)); await audit(request, "coupon.update", "coupon", saved.code); return response.json({ coupon: saved }); } catch (error) { return response.status(400).json({ error: "invalid_coupon", message: error.message }); } });
   router.delete("/coupons/:code", requireAdmin, requireCsrf, async (request, response) => { const code = normalizeCouponCode(request.params.code); if (!(await store.archiveCoupon(code))) return response.status(404).json({ error: "coupon_not_found" }); await audit(request, "coupon.archive", "coupon", code); return response.status(204).end(); });

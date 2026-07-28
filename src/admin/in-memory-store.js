@@ -6,8 +6,7 @@ const copy = (value) => structuredClone(value);
 
 export function createInMemoryStore() {
   const admins = new Map(); const sessions = new Map(); const coupons = new Map(); const orders = new Map(); const audits = []; const events = new Set(); const attempts = new Map(); const reservations = new Map();
-  let campaign = { activeCouponCode: "PULSO35", headline: null };
-  coupons.set("PULSO35", { id: randomUUID(), code: "PULSO35", discountBps: 3500, active: true, startsAt: null, endsAt: null, maxRedemptions: null, productSlugs: [], redemptions: 0, createdAt: now(), updatedAt: now() });
+  let campaign = { activeCouponCode: null, headline: null };
   return {
     async ensureSchema() {}, async close() {},
     async countAdmins() { return admins.size; }, async getAdminByEmail(email) { return copy(admins.get(email) ?? null); },

@@ -53,8 +53,21 @@ export function createMySqlStore(databaseUrl) {
       }
       const [reservationIndexes] = await pool.query("SHOW INDEX FROM coupon_reservations WHERE Key_name='coupon_reservations_provider_order'");
       if (!reservationIndexes.length) await pool.query("ALTER TABLE coupon_reservations ADD UNIQUE INDEX coupon_reservations_provider_order (provider, provider_order_id)");
-      await pool.query(`INSERT IGNORE INTO coupons (id, code, discount_bps, active, product_scope_json) VALUES (UUID(), 'PULSO35', 3500, 1, JSON_ARRAY())`);
-      await pool.query(`INSERT IGNORE INTO app_settings (setting_key, setting_value) VALUES ('campaign', JSON_OBJECT('activeCouponCode', 'PULSO35', 'headline', NULL))`);
+      const [[catalogMigration]] = await pool.query(
+        "SELECT setting_key FROM app_settings WHERE setting_key='catalog-half-price-v1'",
+      );
+      if (!catalogMigration) {
+        await pool.query("UPDATE coupons SET active=0 WHERE code='PULSO35'");
+        await pool.query(
+          "INSERT INTO app_settings (setting_key, setting_value) VALUES ('campaign', JSON_OBJECT('activeCouponCode', NULL, 'headline', NULL)) ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)",
+        );
+        await pool.query(
+          "INSERT INTO app_settings (setting_key, setting_value) VALUES ('catalog-half-price-v1', JSON_OBJECT('appliedAt', NOW(3)))",
+        );
+      }
+      await pool.query(
+        "INSERT IGNORE INTO app_settings (setting_key, setting_value) VALUES ('campaign', JSON_OBJECT('activeCouponCode', NULL, 'headline', NULL))",
+      );
     })();
     return ready;
   }

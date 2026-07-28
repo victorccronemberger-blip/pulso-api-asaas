@@ -104,9 +104,9 @@ test("creates a Pix charge from server-authoritative prices", async (context) =>
         id: "pay_pulso6001",
         status: "PENDING",
         billingType: "PIX",
-        value: 1252.55,
+        value: 1248.5,
         dueDate: "2026-07-29",
-        description: "Novo CPA + Simulados Ancord 2026",
+        description: "CPA 2026 + ANCORD 2026",
         externalReference: payload.externalReference,
         invoiceUrl: "https://sandbox.asaas.com/i/6001",
       };
@@ -125,8 +125,8 @@ test("creates a Pix charge from server-authoritative prices", async (context) =>
     method: "POST",
     headers: requestHeaders(),
     body: JSON.stringify({
-      slugs: ["novo-cpa", "simulados-ancord-2026"],
-      couponCode: "pulso35",
+      slugs: ["novo-cpa", "ancord-2026"],
+      couponCode: null,
       clientTotalCents: 1,
       buyer: buyer(),
       payment: { method: "pix" },
@@ -138,24 +138,24 @@ test("creates a Pix charge from server-authoritative prices", async (context) =>
     status: "open",
     method: "pix",
     installments: 1,
-    installmentCents: 125_255,
-    totalCents: 125_255,
+    installmentCents: 124_850,
+    totalCents: 124_850,
     pix: { qrCodeBase64: "aW1hZ2U=", emv: "000201PULSO", expiresAt: "2026-07-29" },
   });
   const payment = calls.find(([name]) => name === "payment")[1];
   assert.equal(payment.billingType, "PIX");
-  assert.equal(payment.value, 1252.55);
+  assert.equal(payment.value, 1248.5);
   assert.match(payment.externalReference, /^pulso:/);
   const callbackUpdate = calls.find(([name]) => name === "update")[2];
   assert.deepEqual(callbackUpdate, {
     billingType: "PIX",
-    value: 1252.55,
+    value: 1248.5,
     dueDate: "2026-07-29",
     callback: {
       successUrl: "https://pulso.cyara.com.br/checkout/sucesso/?order_id=pay_pulso6001",
       autoRedirect: true,
     },
-    description: "Novo CPA + Simulados Ancord 2026",
+    description: "CPA 2026 + ANCORD 2026",
     externalReference: payment.externalReference,
   });
 });
@@ -172,9 +172,9 @@ test("creates a finite Pix installment plan without increasing the customer tota
         installment: "ins_pixplan6003",
         status: "PENDING",
         billingType: "PIX",
-        value: 324.35,
+        value: 250,
         dueDate: "2026-07-29",
-        description: "Novo CPA",
+        description: "CPA 2026",
         externalReference: payload.externalReference,
         invoiceUrl: "https://sandbox.asaas.com/i/6003",
       };
@@ -195,7 +195,7 @@ test("creates a finite Pix installment plan without increasing the customer tota
     headers: requestHeaders(),
     body: JSON.stringify({
       slugs: ["novo-cpa"],
-      couponCode: "PULSO35",
+      couponCode: null,
       buyer: buyer(),
       payment: { method: "pix_installment", installments: 3 },
     }),
@@ -206,8 +206,8 @@ test("creates a finite Pix installment plan without increasing the customer tota
     status: "open",
     method: "pix_installment",
     installments: 3,
-    installmentCents: 32_435,
-    totalCents: 97_305,
+    installmentCents: 25_000,
+    totalCents: 75_000,
     pix: {
       qrCodeBase64: "aW1hZ2U=",
       emv: "000201PULSOPARCELADO",
@@ -217,7 +217,7 @@ test("creates a finite Pix installment plan without increasing the customer tota
   const payment = calls.find(([name]) => name === "payment")[1];
   assert.equal(payment.billingType, "PIX");
   assert.equal(payment.installmentCount, 3);
-  assert.equal(payment.totalValue, 973.05);
+  assert.equal(payment.totalValue, 750);
   assert.equal("value" in payment, false);
 });
 
@@ -232,9 +232,9 @@ test("creates a ten-installment hosted Asaas invoice without receiving card data
         id: "pay_pulso6002",
         status: "PENDING",
         billingType: "CREDIT_CARD",
-        value: 97.3,
+        value: 75,
         dueDate: "2026-07-29",
-        description: "Novo CPA",
+        description: "CPA 2026",
         externalReference: payload.externalReference,
         invoiceUrl: "https://sandbox.asaas.com/i/6002",
       };
@@ -250,7 +250,7 @@ test("creates a ten-installment hosted Asaas invoice without receiving card data
     headers: requestHeaders(),
     body: JSON.stringify({
       slugs: ["novo-cpa"],
-      couponCode: "PULSO35",
+      couponCode: null,
       buyer: buyer(),
       payment: { method: "credit_card", installments: 10 },
     }),
@@ -261,24 +261,24 @@ test("creates a ten-installment hosted Asaas invoice without receiving card data
     status: "open",
     method: "credit_card",
     installments: 10,
-    totalCents: 97_305,
+    totalCents: 75_000,
     redirectUrl: "https://sandbox.asaas.com/i/6002",
   });
   assert.equal(calls[0].billingType, "CREDIT_CARD");
   assert.equal(calls[0].installmentCount, 10);
-  assert.equal(calls[0].totalValue, 973.05);
+  assert.equal(calls[0].totalValue, 750);
   assert.equal("value" in calls[0], false);
   assert.equal(JSON.stringify(calls[0]).includes("creditCard"), false);
   assert.equal(JSON.stringify(calls[0]).includes("cvv"), false);
   assert.deepEqual(calls[1], {
     billingType: "CREDIT_CARD",
-    value: 97.3,
+    value: 75,
     dueDate: "2026-07-29",
     callback: {
       successUrl: "https://pulso.cyara.com.br/checkout/sucesso/?order_id=pay_pulso6002",
       autoRedirect: true,
     },
-    description: "Novo CPA",
+    description: "CPA 2026",
     externalReference: calls[0].externalReference,
   });
 });
@@ -288,7 +288,7 @@ test("returns ten server-authoritative interest-free installment options", async
   const response = await fetch(`${origin}/v1/checkout/installments`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ slugs: ["novo-cpa"], couponCode: "PULSO35" }),
+    body: JSON.stringify({ slugs: ["novo-cpa"], couponCode: null }),
   });
   assert.equal(response.status, 200);
   const result = await response.json();
@@ -298,8 +298,8 @@ test("returns ten server-authoritative interest-free installment options", async
   assert.equal(result.installments.length, 10);
   assert.deepEqual(result.installments[9], {
     number: 10,
-    totalCents: 97_305,
-    installmentCents: 9_731,
+    totalCents: 75_000,
+    installmentCents: 7_500,
     interestFree: true,
   });
 });
@@ -314,7 +314,7 @@ test("rejects Pix installment plans above six installments", async (context) => 
     headers: requestHeaders(),
     body: JSON.stringify({
       slugs: ["novo-cpa"],
-      couponCode: "PULSO35",
+      couponCode: null,
       buyer: buyer(),
       payment: { method: "pix_installment", installments: 7 },
     }),
@@ -367,7 +367,7 @@ test("allows a safe retry with the same idempotency key before an Asaas charge e
   };
   const origin = await serve(context, enabledEnvironment, { asaasClient });
   const key = crypto.randomUUID();
-  const payload = { slugs: ["novo-cpa"], couponCode: "PULSO35", buyer: buyer(), payment: { method: "pix" } };
+  const payload = { slugs: ["novo-cpa"], couponCode: null, buyer: buyer(), payment: { method: "pix" } };
   const first = await fetch(`${origin}/v1/checkout/orders`, {
     method: "POST", headers: requestHeaders(key), body: JSON.stringify(payload),
   });

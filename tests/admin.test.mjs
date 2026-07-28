@@ -41,7 +41,7 @@ test("quotes only eligible coupons and publishes the campaign without leaking ad
   await store.saveCoupon({ code: "CPA20", discountBps: 2000, active: true, startsAt: null, endsAt: null, maxRedemptions: 1, productSlugs: ["novo-cpa"] });
   await store.saveCampaign({ activeCouponCode: "CPA20", headline: "Condi\u00e7\u00e3o de lan\u00e7amento" });
   const quote = await fetch(`${base}/v1/public/quote`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ slugs: ["novo-cpa"], couponCode: "CPA20" }) });
-  assert.equal(quote.status, 200); assert.equal((await quote.json()).discountCents, 29_940);
+  assert.equal(quote.status, 200); assert.equal((await quote.json()).discountCents, 15_000);
   const scopedOut = await fetch(`${base}/v1/public/quote`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ slugs: ["cpro-i"], couponCode: "CPA20" }) });
   assert.equal(scopedOut.status, 400);
   const campaign = await fetch(`${base}/v1/public/campaign`);
@@ -51,12 +51,13 @@ test("quotes only eligible coupons and publishes the campaign without leaking ad
 test("persists checkout orders and applies coupon redemption once on an Asaas webhook", async (context) => {
   const { store } = await api(context);
   const attemptKey = "a0000000-0000-4000-8000-000000000055";
-  await store.reserveCoupon("PULSO35", attemptKey, []);
-  await store.createOrder({ provider: "asaas", providerOrderId: "pay_55", checkoutAttemptKey: attemptKey, status: "open", buyerEmail: "buyer@example.test", couponCode: "PULSO35", subtotalCents: 1000, discountCents: 350, totalCents: 650, lines: [] });
+  await store.saveCoupon({ code: "TEST35", discountBps: 3500, active: true, startsAt: null, endsAt: null, maxRedemptions: null, productSlugs: [] });
+  await store.reserveCoupon("TEST35", attemptKey, []);
+  await store.createOrder({ provider: "asaas", providerOrderId: "pay_55", checkoutAttemptKey: attemptKey, status: "open", buyerEmail: "buyer@example.test", couponCode: "TEST35", subtotalCents: 1000, discountCents: 350, totalCents: 650, lines: [] });
   await store.updateOrderFromWebhook({ provider: "asaas", providerOrderId: "pay_55", status: "paid", eventId: "paid-55" });
   await store.updateOrderFromWebhook({ provider: "asaas", providerOrderId: "pay_55", status: "paid", eventId: "paid-55" });
   await store.updateOrderFromWebhook({ provider: "asaas", providerOrderId: "pay_55", status: "processing", eventId: "late-processing-55" });
-  const coupon = await store.getCoupon("PULSO35");
+  const coupon = await store.getCoupon("TEST35");
   assert.equal(coupon.redemptions, 1);
   assert.deepEqual(await store.overview(), {
     orders: 1,
@@ -95,20 +96,21 @@ test("reconciles a paid webhook that arrives before local order enrichment", asy
   const store = createInMemoryStore();
   const attemptKey = "a0000000-0000-4000-8000-000000000088";
   await store.updateOrderFromWebhook({ provider: "asaas", providerOrderId: "pay_88", status: "paid", eventId: "paid-before-order-88" });
-  await store.reserveCoupon("PULSO35", attemptKey, []);
+  await store.saveCoupon({ code: "TEST35", discountBps: 3500, active: true, startsAt: null, endsAt: null, maxRedemptions: null, productSlugs: [] });
+  await store.reserveCoupon("TEST35", attemptKey, []);
   await store.createOrder({
     provider: "asaas",
     providerOrderId: "pay_88",
     checkoutAttemptKey: attemptKey,
     status: "created",
     buyerEmail: "buyer@example.test",
-    couponCode: "PULSO35",
+    couponCode: "TEST35",
     subtotalCents: 1000,
     discountCents: 350,
     totalCents: 650,
     lines: [],
   });
-  const coupon = await store.getCoupon("PULSO35");
+  const coupon = await store.getCoupon("TEST35");
   assert.equal(coupon.redemptions, 1);
   assert.equal((await store.overview()).paidOrders, 1);
 });
