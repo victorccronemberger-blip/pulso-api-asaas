@@ -64,6 +64,16 @@ test("reports a healthy API while keeping checkout disabled without Asaas creden
   });
 });
 
+test("restores an Asaas key prefix stripped by a managed runtime", () => {
+  const { environment } = createApp({
+    ASAAS_ENABLED: "true",
+    ASAAS_ENVIRONMENT: "sandbox",
+    ASAAS_API_KEY: "aact_test_key",
+  });
+  assert.equal(environment.asaasApiKey, "$aact_test_key");
+  assert.equal(environment.checkoutEnabled, true);
+});
+
 test("creates a Pix charge from server-authoritative prices", async (context) => {
   const calls = [];
   const asaasClient = {

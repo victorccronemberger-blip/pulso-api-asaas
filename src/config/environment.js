@@ -24,9 +24,18 @@ function parseEnvironment(value) {
   return environment;
 }
 
+function parseAsaasApiKey(value) {
+  const key = String(value ?? "").trim();
+  if (!key) return null;
+  // Some managed Node.js runtimes interpolate a leading "$" while injecting
+  // environment variables. Accept the same key without that transport prefix
+  // and restore it only inside the process.
+  return key.startsWith("aact_") ? `$${key}` : key;
+}
+
 export function getEnvironment(source = process.env) {
   const asaasEnvironment = parseEnvironment(source.ASAAS_ENVIRONMENT);
-  const asaasApiKey = source.ASAAS_API_KEY?.trim() || null;
+  const asaasApiKey = parseAsaasApiKey(source.ASAAS_API_KEY);
   const asaasWebhookToken = source.ASAAS_WEBHOOK_TOKEN?.trim() || null;
   const asaasRequested = parseBoolean(source.ASAAS_ENABLED ?? "false");
   const asaasAvailable = Boolean(asaasApiKey);
