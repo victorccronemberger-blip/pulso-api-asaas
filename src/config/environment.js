@@ -25,11 +25,12 @@ function parseEnvironment(value) {
 }
 
 function parseAsaasApiKey(value) {
-  const key = String(value ?? "").trim();
+  const transported = String(value ?? "").trim();
+  const key = transported.startsWith("\\$aact_") ? transported.slice(1) : transported;
   if (!key) return null;
   // Some managed Node.js runtimes interpolate a leading "$" while injecting
-  // environment variables. Accept the same key without that transport prefix
-  // and restore it only inside the process.
+  // environment variables or preserve its escape character. Normalize only
+  // those transport forms and restore the original credential in-process.
   return key.startsWith("aact_") ? `$${key}` : key;
 }
 
