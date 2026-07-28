@@ -7,6 +7,7 @@ import {
 } from "../domain/installments.js";
 import { CheckoutValidationError, createAuthoritativeQuote } from "../domain/quote.js";
 import { createFixedWindowLimiter } from "../http/fixed-window-limiter.js";
+import { customerSessionFromRequest } from "../customer/session.js";
 
 const PAID_STATUSES = new Set(["RECEIVED", "CONFIRMED", "RECEIVED_IN_CASH"]);
 const FAILED_STATUSES = new Set(["OVERDUE"]);
@@ -106,8 +107,8 @@ function providerId(value, label = "payment id") {
   return id;
 }
 
-function checkoutFingerprint(body) {
-  return createHash("sha256").update(JSON.stringify(body)).digest("hex");
+function checkoutFingerprint(body, customerId) {
+  return createHash("sha256").update(JSON.stringify({ body, customerId })).digest("hex");
 }
 
 function idempotencyKey(request) {
@@ -249,17 +250,38 @@ export function createCheckoutRouter(express, { environment, asaasClient, store 
     let quote;
     let buyer;
     let payment;
+    let accountSession;
     try {
       key = idempotencyKey(request);
       quote = await quoteFromBody(request.body, store);
       buyer = parseBuyer(request.body?.buyer, request.ip);
       payment = parsePayment(request.body?.payment);
+      accountSession = await customerSessionFromRequest(
+        request,
+        store,
+        environment.sessionPepper,
+      );
     } catch (error) {
       if (handleInputError(error, response)) return;
       throw error;
     }
+    if (!accountSession) {
+      response.status(401).json({
+        error: "customer_authentication_required",
+        message: "Entre na sua conta antes de concluir o pagamento.",
+      });
+      return;
+    }
+    if (accountSession.customer.email !== buyer.email) {
+      response.status(400).json({
+        error: "customer_email_mismatch",
+        message: "Use o mesmo e-mail da sua conta no checkout.",
+        retryable: true,
+      });
+      return;
+    }
 
-    const fingerprint = checkoutFingerprint(request.body);
+    const fingerprint = checkoutFingerprint(request.body, accountSession.customer.id);
     const attempt = await store.beginCheckoutAttempt(key, fingerprint);
     if (attempt.kind === "conflict") {
       response.status(409).json({ error: "idempotency_conflict", message: "Esta tentativa já foi usada com outro pedido.", retryable: true });
@@ -293,10 +315,16 @@ export function createCheckoutRouter(express, { environment, asaasClient, store 
     let persistedOrderId = null;
     let result;
     try {
-      if (payment.installments > 1 && !interestFreeInstallment(quote.totalCents, payment.installments)) {
+      const installment = interestFreeInstallment(quote.totalCents, payment.installments);
+      if (payment.installments > 1 && !installment) {
         throw new CheckoutInputError("O parcelamento escolhido não está disponível.", "invalid_installments");
       }
 
+      await store.updateCustomerProfile(accountSession.customer.id, {
+        displayName: buyer.name,
+        mobilePhone: buyer.mobilePhone,
+        documentLast4: buyer.cpfCnpj.slice(-4),
+      });
       const customerId = await findOrCreateCustomer(asaasClient, buyer, key);
       const providerPayment = await asaasClient.createPayment(paymentPayload({
         customerId,
@@ -332,6 +360,10 @@ export function createCheckoutRouter(express, { environment, asaasClient, store 
         checkoutAttemptKey: quote.coupon ? key : null,
         status: asaasOrderStatus(updatedPayment?.status ?? providerPayment?.status),
         buyerEmail: buyer.email,
+        customerId: accountSession.customer.id,
+        paymentMethod: payment.method,
+        installments: payment.installments,
+        installmentCents: installment?.installmentCents ?? quote.totalCents,
         couponCode: quote.coupon?.code ?? null,
         subtotalCents: quote.subtotalCents,
         discountCents: quote.discountCents,
@@ -345,7 +377,6 @@ export function createCheckoutRouter(express, { environment, asaasClient, store 
         if (typeof pix?.encodedImage !== "string" || typeof pix?.payload !== "string") {
           throw new Error("Asaas returned incomplete Pix instructions.");
         }
-        const installment = interestFreeInstallment(quote.totalCents, payment.installments);
         result = {
           status: 201,
           body: {

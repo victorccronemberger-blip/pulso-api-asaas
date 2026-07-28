@@ -7,6 +7,7 @@ import { createAsaasWebhookHandler } from "./routes/asaas-integration.js";
 import { createCheckoutRouter } from "./routes/checkout.js";
 import { createHealthRouter } from "./routes/health.js";
 import { createAdminRouter, createPublicCommerceRouter } from "./routes/admin.js";
+import { createCustomerRouter } from "./routes/customer.js";
 import { createInMemoryStore } from "./admin/in-memory-store.js";
 import { createMySqlStore } from "./admin/mysql-store.js";
 
@@ -71,6 +72,7 @@ export function createApp(overrides = {}, dependencies = {}) {
     createAsaasWebhookHandler({ environment, store }),
   );
   app.use("/v1/checkout", createCheckoutRouter(express, { environment, asaasClient, store }));
+  app.use("/v1/customer", createCustomerRouter(express, { environment, store }));
   app.use("/v1/admin", createAdminRouter(express, { environment, store }));
   app.use("/v1/public", createPublicCommerceRouter(express, { store }));
 

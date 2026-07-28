@@ -40,6 +40,23 @@ function requestHeaders(key = crypto.randomUUID()) {
   };
 }
 
+async function authenticatedHeaders(origin, key = crypto.randomUUID()) {
+  const registration = await fetch(`${origin}/v1/customer/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      displayName: "Victor Cronemberger",
+      email: buyer().email,
+      password: "pulso-test-password-2026",
+    }),
+  });
+  assert.equal(registration.status, 201);
+  const cookie = registration.headers.getSetCookie()
+    .map((value) => value.split(";")[0])
+    .join("; ");
+  return { ...requestHeaders(key), cookie };
+}
+
 test("reports a healthy API while keeping checkout disabled without Asaas credentials", async (context) => {
   const origin = await serve(context, { ASAAS_ENABLED: "true" });
   const response = await fetch(`${origin}/health`, {
@@ -123,7 +140,7 @@ test("creates a Pix charge from server-authoritative prices", async (context) =>
   const origin = await serve(context, enabledEnvironment, { asaasClient });
   const response = await fetch(`${origin}/v1/checkout/orders`, {
     method: "POST",
-    headers: requestHeaders(),
+    headers: await authenticatedHeaders(origin),
     body: JSON.stringify({
       slugs: ["novo-cpa", "ancord-2026"],
       couponCode: null,
@@ -192,7 +209,7 @@ test("creates a finite Pix installment plan without increasing the customer tota
   const origin = await serve(context, enabledEnvironment, { asaasClient });
   const response = await fetch(`${origin}/v1/checkout/orders`, {
     method: "POST",
-    headers: requestHeaders(),
+    headers: await authenticatedHeaders(origin),
     body: JSON.stringify({
       slugs: ["novo-cpa"],
       couponCode: null,
@@ -247,7 +264,7 @@ test("creates a ten-installment hosted Asaas invoice without receiving card data
   const origin = await serve(context, enabledEnvironment, { asaasClient });
   const response = await fetch(`${origin}/v1/checkout/orders`, {
     method: "POST",
-    headers: requestHeaders(),
+    headers: await authenticatedHeaders(origin),
     body: JSON.stringify({
       slugs: ["novo-cpa"],
       couponCode: null,
@@ -367,13 +384,14 @@ test("allows a safe retry with the same idempotency key before an Asaas charge e
   };
   const origin = await serve(context, enabledEnvironment, { asaasClient });
   const key = crypto.randomUUID();
+  const headers = await authenticatedHeaders(origin, key);
   const payload = { slugs: ["novo-cpa"], couponCode: null, buyer: buyer(), payment: { method: "pix" } };
   const first = await fetch(`${origin}/v1/checkout/orders`, {
-    method: "POST", headers: requestHeaders(key), body: JSON.stringify(payload),
+    method: "POST", headers, body: JSON.stringify(payload),
   });
   assert.equal(first.status, 502);
   const second = await fetch(`${origin}/v1/checkout/orders`, {
-    method: "POST", headers: requestHeaders(key), body: JSON.stringify(payload),
+    method: "POST", headers, body: JSON.stringify(payload),
   });
   assert.equal(second.status, 201);
   assert.equal((await second.json()).orderId, "pay_retry6010");

@@ -3,9 +3,19 @@ import { resolveOrderStatus } from "./order-status.js";
 
 const now = () => new Date().toISOString();
 const copy = (value) => structuredClone(value);
+const customerOrder = (order) => order && ({
+  ...order,
+  lines: (order.lines ?? []).map((line) => ({
+    slug: line.slug ?? line.product?.slug,
+    title: line.title ?? line.product?.title,
+    basePriceCents: line.basePriceCents,
+    discountCents: line.discountCents,
+    finalPriceCents: line.finalPriceCents,
+  })),
+});
 
 export function createInMemoryStore() {
-  const admins = new Map(); const sessions = new Map(); const coupons = new Map(); const orders = new Map(); const audits = []; const events = new Set(); const attempts = new Map(); const reservations = new Map();
+  const admins = new Map(); const sessions = new Map(); const customers = new Map(); const customerSessions = new Map(); const coupons = new Map(); const orders = new Map(); const audits = []; const events = new Set(); const attempts = new Map(); const reservations = new Map();
   let campaign = { activeCouponCode: null, headline: null };
   return {
     async ensureSchema() {}, async close() {},
@@ -14,6 +24,12 @@ export function createInMemoryStore() {
     async createSession(session) { sessions.set(session.tokenHash, { ...session, id: randomUUID() }); },
     async getSession(tokenHash) { const item = sessions.get(tokenHash); if (!item || item.expiresAt < Date.now()) return null; const admin = [...admins.values()].find((row) => row.id === item.adminId); return admin ? copy({ ...item, admin }) : null; },
     async revokeSession(tokenHash) { sessions.delete(tokenHash); },
+    async getCustomerByEmail(email) { return copy(customers.get(email) ?? null); },
+    async createCustomer(customer) { const value = { id: randomUUID(), mobilePhone: null, documentLast4: null, ...customer, createdAt: now() }; customers.set(value.email, value); return copy(value); },
+    async updateCustomerProfile(customerId, profile) { const customer = [...customers.values()].find((item) => item.id === customerId); if (!customer) return null; Object.assign(customer, profile); return copy(customer); },
+    async createCustomerSession(session) { customerSessions.set(session.tokenHash, { ...session, id: randomUUID() }); },
+    async getCustomerSession(tokenHash) { const item = customerSessions.get(tokenHash); if (!item || item.expiresAt < Date.now()) return null; const customer = [...customers.values()].find((row) => row.id === item.customerId); return customer ? copy({ ...item, customer }) : null; },
+    async revokeCustomerSession(tokenHash) { customerSessions.delete(tokenHash); },
     async listCoupons() { return copy([...coupons.values()].sort((a, b) => a.code.localeCompare(b.code))); },
     async getCoupon(code) { return copy(coupons.get(code) ?? null); },
     async saveCoupon(coupon) { const old = coupons.get(coupon.code); const value = { id: old?.id ?? randomUUID(), ...old, ...coupon, redemptions: old?.redemptions ?? 0, createdAt: old?.createdAt ?? now(), updatedAt: now() }; coupons.set(value.code, value); return copy(value); },
@@ -58,6 +74,8 @@ export function createInMemoryStore() {
       return [...aggregate.values()].sort((left, right) => left.day.localeCompare(right.day));
     },
     async listOrders({ limit = 50, status } = {}) { return copy([...orders.values()].filter((o) => !status || o.status === status).sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, limit)); },
+    async listCustomerOrders(customerId, { limit = 50 } = {}) { return copy([...orders.values()].filter((order) => order.customerId === customerId).sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, limit).map(customerOrder)); },
+    async getCustomerOrder(customerId, orderId) { return copy(customerOrder([...orders.values()].find((order) => order.customerId === customerId && order.id === orderId) ?? null)); },
     async listAudit({ limit = 100 } = {}) { return copy(audits.slice(0, limit)); },
   };
 }

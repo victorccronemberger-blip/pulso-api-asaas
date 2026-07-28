@@ -18,8 +18,10 @@ export function createMySqlStore(databaseUrl) {
       const statements = [
         `CREATE TABLE IF NOT EXISTS administrators (id CHAR(36) PRIMARY KEY, email VARCHAR(160) NOT NULL UNIQUE, password_salt VARCHAR(64) NOT NULL, password_hash VARCHAR(128) NOT NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3))`,
         `CREATE TABLE IF NOT EXISTS admin_sessions (id CHAR(36) PRIMARY KEY, admin_id CHAR(36) NOT NULL, token_hash CHAR(64) NOT NULL UNIQUE, csrf_hash CHAR(64) NOT NULL, expires_at DATETIME(3) NOT NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), INDEX admin_sessions_expiry (expires_at), CONSTRAINT admin_sessions_admin_fk FOREIGN KEY (admin_id) REFERENCES administrators(id) ON DELETE CASCADE)`,
+        `CREATE TABLE IF NOT EXISTS customers (id CHAR(36) PRIMARY KEY, email VARCHAR(160) NOT NULL UNIQUE, display_name VARCHAR(120) NOT NULL, mobile_phone VARCHAR(16) NULL, document_last4 CHAR(4) NULL, password_salt VARCHAR(64) NOT NULL, password_hash VARCHAR(128) NOT NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3))`,
+        `CREATE TABLE IF NOT EXISTS customer_sessions (id CHAR(36) PRIMARY KEY, customer_id CHAR(36) NOT NULL, token_hash CHAR(64) NOT NULL UNIQUE, csrf_hash CHAR(64) NOT NULL, expires_at DATETIME(3) NOT NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), INDEX customer_sessions_expiry (expires_at), CONSTRAINT customer_sessions_customer_fk FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE)`,
         `CREATE TABLE IF NOT EXISTS coupons (id CHAR(36) PRIMARY KEY, code VARCHAR(32) NOT NULL UNIQUE, discount_bps SMALLINT UNSIGNED NOT NULL, active TINYINT(1) NOT NULL DEFAULT 1, starts_at DATETIME(3) NULL, ends_at DATETIME(3) NULL, max_redemptions INT UNSIGNED NULL, product_scope_json JSON NOT NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3), INDEX coupons_active (active, starts_at, ends_at))`,
-        `CREATE TABLE IF NOT EXISTS orders (id CHAR(36) PRIMARY KEY, provider VARCHAR(24) NOT NULL, provider_order_id VARCHAR(80) NOT NULL, provider_group_id VARCHAR(80) NULL, status VARCHAR(32) NOT NULL, buyer_email VARCHAR(160) NULL, subtotal_cents INT UNSIGNED NOT NULL, discount_cents INT UNSIGNED NOT NULL, total_cents INT UNSIGNED NOT NULL, coupon_code VARCHAR(32) NULL, coupon_redeemed TINYINT(1) NOT NULL DEFAULT 0, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3), UNIQUE INDEX orders_provider_order (provider, provider_order_id), INDEX orders_provider_group (provider, provider_group_id), INDEX orders_status_updated (status, updated_at))`,
+        `CREATE TABLE IF NOT EXISTS orders (id CHAR(36) PRIMARY KEY, provider VARCHAR(24) NOT NULL, provider_order_id VARCHAR(80) NOT NULL, provider_group_id VARCHAR(80) NULL, status VARCHAR(32) NOT NULL, buyer_email VARCHAR(160) NULL, customer_id CHAR(36) NULL, payment_method VARCHAR(24) NULL, installments TINYINT UNSIGNED NULL, installment_cents INT UNSIGNED NULL, subtotal_cents INT UNSIGNED NOT NULL, discount_cents INT UNSIGNED NOT NULL, total_cents INT UNSIGNED NOT NULL, coupon_code VARCHAR(32) NULL, coupon_redeemed TINYINT(1) NOT NULL DEFAULT 0, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3), UNIQUE INDEX orders_provider_order (provider, provider_order_id), INDEX orders_provider_group (provider, provider_group_id), INDEX orders_status_updated (status, updated_at), INDEX orders_customer_updated (customer_id, updated_at))`,
         `CREATE TABLE IF NOT EXISTS order_items (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, order_id CHAR(36) NOT NULL, course_slug VARCHAR(80) NOT NULL, title VARCHAR(180) NOT NULL, base_price_cents INT UNSIGNED NOT NULL, discount_cents INT UNSIGNED NOT NULL, final_price_cents INT UNSIGNED NOT NULL, CONSTRAINT order_items_order_fk FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE)`,
         `CREATE TABLE IF NOT EXISTS coupon_redemptions (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, coupon_code VARCHAR(32) NOT NULL, order_id CHAR(36) NOT NULL UNIQUE, redeemed_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), INDEX coupon_redemptions_code (coupon_code))`,
         `CREATE TABLE IF NOT EXISTS coupon_reservations (attempt_key CHAR(36) PRIMARY KEY, coupon_code VARCHAR(32) NOT NULL, provider VARCHAR(24) NULL, provider_order_id VARCHAR(80) NULL, expires_at DATETIME(3) NOT NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), UNIQUE INDEX coupon_reservations_provider_order (provider, provider_order_id), INDEX coupon_reservations_code_expiry (coupon_code, expires_at))`,
@@ -34,6 +36,10 @@ export function createMySqlStore(databaseUrl) {
       if (!orderColumnNames.has("provider")) await pool.query("ALTER TABLE orders ADD COLUMN provider VARCHAR(24) NULL AFTER id");
       if (!orderColumnNames.has("provider_order_id")) await pool.query("ALTER TABLE orders ADD COLUMN provider_order_id VARCHAR(80) NULL AFTER provider");
       if (!orderColumnNames.has("provider_group_id")) await pool.query("ALTER TABLE orders ADD COLUMN provider_group_id VARCHAR(80) NULL AFTER provider_order_id");
+      if (!orderColumnNames.has("customer_id")) await pool.query("ALTER TABLE orders ADD COLUMN customer_id CHAR(36) NULL AFTER buyer_email");
+      if (!orderColumnNames.has("payment_method")) await pool.query("ALTER TABLE orders ADD COLUMN payment_method VARCHAR(24) NULL AFTER customer_id");
+      if (!orderColumnNames.has("installments")) await pool.query("ALTER TABLE orders ADD COLUMN installments TINYINT UNSIGNED NULL AFTER payment_method");
+      if (!orderColumnNames.has("installment_cents")) await pool.query("ALTER TABLE orders ADD COLUMN installment_cents INT UNSIGNED NULL AFTER installments");
       if (orderColumnNames.has("appmax_order_id")) {
         await pool.query("ALTER TABLE orders MODIFY appmax_order_id BIGINT UNSIGNED NULL");
         await pool.query("UPDATE orders SET provider='appmax', provider_order_id=CAST(appmax_order_id AS CHAR) WHERE provider_order_id IS NULL AND appmax_order_id IS NOT NULL");
@@ -43,6 +49,8 @@ export function createMySqlStore(databaseUrl) {
       if (!orderIndexes.length) await pool.query("ALTER TABLE orders ADD UNIQUE INDEX orders_provider_order (provider, provider_order_id)");
       const [orderGroupIndexes] = await pool.query("SHOW INDEX FROM orders WHERE Key_name='orders_provider_group'");
       if (!orderGroupIndexes.length) await pool.query("ALTER TABLE orders ADD INDEX orders_provider_group (provider, provider_group_id)");
+      const [orderCustomerIndexes] = await pool.query("SHOW INDEX FROM orders WHERE Key_name='orders_customer_updated'");
+      if (!orderCustomerIndexes.length) await pool.query("ALTER TABLE orders ADD INDEX orders_customer_updated (customer_id, updated_at)");
 
       const [reservationColumns] = await pool.query("SHOW COLUMNS FROM coupon_reservations");
       const reservationColumnNames = new Set(reservationColumns.map((column) => column.Field));
@@ -80,6 +88,12 @@ export function createMySqlStore(databaseUrl) {
     async createSession(session) { await ensureSchema(); await pool.query("INSERT INTO admin_sessions (id,admin_id,token_hash,csrf_hash,expires_at) VALUES (?,?,?,?,?)", [id(),session.adminId,session.tokenHash,session.csrfHash,new Date(session.expiresAt)]); },
     async getSession(tokenHash) { await ensureSchema(); const [[row]] = await pool.query("SELECT s.id,s.admin_id AS adminId,s.csrf_hash AS csrfHash,s.expires_at AS expiresAt,a.email FROM admin_sessions s JOIN administrators a ON a.id=s.admin_id WHERE s.token_hash=? AND s.expires_at > NOW(3)", [tokenHash]); return row ? { ...row, expiresAt: +new Date(row.expiresAt), admin: { id: row.adminId, email: row.email } } : null; },
     async revokeSession(tokenHash) { await ensureSchema(); await pool.query("DELETE FROM admin_sessions WHERE token_hash=?", [tokenHash]); },
+    async getCustomerByEmail(email) { await ensureSchema(); const [[row]] = await pool.query("SELECT id,email,display_name AS displayName,mobile_phone AS mobilePhone,document_last4 AS documentLast4,password_salt AS passwordSalt,password_hash AS passwordHash,created_at AS createdAt FROM customers WHERE email=?", [email]); return row ? { ...row, createdAt: iso(row.createdAt) } : null; },
+    async createCustomer(customer) { await ensureSchema(); const value={id:id(),...customer}; await pool.query("INSERT INTO customers (id,email,display_name,password_salt,password_hash) VALUES (?,?,?,?,?)",[value.id,value.email,value.displayName,value.passwordSalt,value.passwordHash]); return { ...value, mobilePhone:null, documentLast4:null, createdAt:new Date().toISOString() }; },
+    async updateCustomerProfile(customerId, profile) { await ensureSchema(); await pool.query("UPDATE customers SET display_name=?,mobile_phone=?,document_last4=? WHERE id=?",[profile.displayName,profile.mobilePhone,profile.documentLast4,customerId]); const [[row]]=await pool.query("SELECT id,email,display_name AS displayName,mobile_phone AS mobilePhone,document_last4 AS documentLast4,created_at AS createdAt FROM customers WHERE id=?",[customerId]); return row ? { ...row, createdAt:iso(row.createdAt) } : null; },
+    async createCustomerSession(session) { await ensureSchema(); await pool.query("INSERT INTO customer_sessions (id,customer_id,token_hash,csrf_hash,expires_at) VALUES (?,?,?,?,?)",[id(),session.customerId,session.tokenHash,session.csrfHash,new Date(session.expiresAt)]); },
+    async getCustomerSession(tokenHash) { await ensureSchema(); const [[row]]=await pool.query("SELECT s.id,s.customer_id AS customerId,s.csrf_hash AS csrfHash,s.expires_at AS expiresAt,c.email,c.display_name AS displayName,c.mobile_phone AS mobilePhone,c.document_last4 AS documentLast4,c.created_at AS customerCreatedAt FROM customer_sessions s JOIN customers c ON c.id=s.customer_id WHERE s.token_hash=? AND s.expires_at>NOW(3)",[tokenHash]); return row ? { id:row.id,customerId:row.customerId,csrfHash:row.csrfHash,expiresAt:+new Date(row.expiresAt),customer:{id:row.customerId,email:row.email,displayName:row.displayName,mobilePhone:row.mobilePhone,documentLast4:row.documentLast4,createdAt:iso(row.customerCreatedAt)} } : null; },
+    async revokeCustomerSession(tokenHash) { await ensureSchema(); await pool.query("DELETE FROM customer_sessions WHERE token_hash=?",[tokenHash]); },
     async listCoupons() { await ensureSchema(); const [rows] = await pool.query("SELECT c.*, (SELECT COUNT(*) FROM coupon_redemptions r WHERE r.coupon_code=c.code) redemptions FROM coupons c ORDER BY c.code"); return rows.map(coupon); },
     async getCoupon(code) { await ensureSchema(); const [[row]] = await pool.query("SELECT c.*, (SELECT COUNT(*) FROM coupon_redemptions r WHERE r.coupon_code=c.code) redemptions FROM coupons c WHERE code=?", [code]); return coupon(row); },
     async saveCoupon(value) { await ensureSchema(); const existing = await this.getCoupon(value.code); const next = { id: existing?.id ?? id(), ...value }; await pool.query("INSERT INTO coupons (id,code,discount_bps,active,starts_at,ends_at,max_redemptions,product_scope_json) VALUES (?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE discount_bps=VALUES(discount_bps),active=VALUES(active),starts_at=VALUES(starts_at),ends_at=VALUES(ends_at),max_redemptions=VALUES(max_redemptions),product_scope_json=VALUES(product_scope_json)", [next.id,next.code,next.discountBps,next.active?1:0,next.startsAt,next.endsAt,next.maxRedemptions,asJson(next.productSlugs)]); return this.getCoupon(next.code); },
@@ -103,14 +117,14 @@ export function createMySqlStore(databaseUrl) {
         const status = resolveOrderStatus(existing?.status, order.status);
         if (existing) {
           await connection.query(
-            "UPDATE orders SET provider_group_id=?,status=?,buyer_email=?,subtotal_cents=?,discount_cents=?,total_cents=?,coupon_code=? WHERE id=?",
-            [order.providerGroupId ?? null, status, order.buyerEmail, order.subtotalCents, order.discountCents, order.totalCents, order.couponCode, orderId],
+            "UPDATE orders SET provider_group_id=?,status=?,buyer_email=?,customer_id=?,payment_method=?,installments=?,installment_cents=?,subtotal_cents=?,discount_cents=?,total_cents=?,coupon_code=? WHERE id=?",
+            [order.providerGroupId ?? null, status, order.buyerEmail, order.customerId ?? null, order.paymentMethod ?? null, order.installments ?? null, order.installmentCents ?? null, order.subtotalCents, order.discountCents, order.totalCents, order.couponCode, orderId],
           );
           await connection.query("DELETE FROM order_items WHERE order_id=?", [orderId]);
         } else {
           await connection.query(
-            "INSERT INTO orders (id,provider,provider_order_id,provider_group_id,status,buyer_email,subtotal_cents,discount_cents,total_cents,coupon_code) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            [orderId, order.provider, order.providerOrderId, order.providerGroupId ?? null, status, order.buyerEmail, order.subtotalCents, order.discountCents, order.totalCents, order.couponCode],
+            "INSERT INTO orders (id,provider,provider_order_id,provider_group_id,status,buyer_email,customer_id,payment_method,installments,installment_cents,subtotal_cents,discount_cents,total_cents,coupon_code) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [orderId, order.provider, order.providerOrderId, order.providerGroupId ?? null, status, order.buyerEmail, order.customerId ?? null, order.paymentMethod ?? null, order.installments ?? null, order.installmentCents ?? null, order.subtotalCents, order.discountCents, order.totalCents, order.couponCode],
           );
         }
         for (const line of order.lines) {
@@ -234,6 +248,28 @@ export function createMySqlStore(databaseUrl) {
         discountCents:Number(row.discountCents),
         totalCents:Number(row.totalCents),
       }));
+    },
+    async listCustomerOrders(customerId,{limit=50}={}) {
+      await ensureSchema();
+      const [rows]=await pool.query(`SELECT id,status,payment_method AS paymentMethod,installments,installment_cents AS installmentCents,
+        subtotal_cents AS subtotalCents,discount_cents AS discountCents,total_cents AS totalCents,coupon_code AS couponCode,
+        created_at AS createdAt,updated_at AS updatedAt FROM orders WHERE customer_id=? ORDER BY updated_at DESC LIMIT ?`,[customerId,limit]);
+      if (!rows.length) return [];
+      const placeholders=rows.map(()=>"?").join(",");
+      const [items]=await pool.query(`SELECT order_id AS orderId,course_slug AS slug,title,base_price_cents AS basePriceCents,
+        discount_cents AS discountCents,final_price_cents AS finalPriceCents FROM order_items WHERE order_id IN (${placeholders}) ORDER BY id`,rows.map((row)=>row.id));
+      return rows.map((row)=>({
+        ...row,
+        installments:row.installments===null?null:Number(row.installments),
+        installmentCents:row.installmentCents===null?null:Number(row.installmentCents),
+        subtotalCents:Number(row.subtotalCents),discountCents:Number(row.discountCents),totalCents:Number(row.totalCents),
+        createdAt:iso(row.createdAt),updatedAt:iso(row.updatedAt),
+        lines:items.filter((item)=>item.orderId===row.id).map((item)=>({...item,basePriceCents:Number(item.basePriceCents),discountCents:Number(item.discountCents),finalPriceCents:Number(item.finalPriceCents)})),
+      }));
+    },
+    async getCustomerOrder(customerId,orderId) {
+      const orders=await this.listCustomerOrders(customerId,{limit:100});
+      return orders.find((order)=>order.id===orderId)??null;
     },
     async listOrders({limit=50,status}={}) {
       await ensureSchema();

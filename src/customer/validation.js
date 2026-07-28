@@ -1,0 +1,42 @@
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function email(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized.length <= 160 && EMAIL_PATTERN.test(normalized) ? normalized : null;
+}
+
+function displayName(value) {
+  const normalized = String(value ?? "").trim().replace(/\s+/g, " ");
+  return normalized.length >= 2 && normalized.length <= 120 ? normalized : null;
+}
+
+function password(value) {
+  return typeof value === "string" && value.length >= 12 && value.length <= 128
+    ? value
+    : null;
+}
+
+export function validateCustomerCredentials(body) {
+  const normalizedEmail = email(body?.email);
+  const normalizedPassword = password(body?.password);
+  if (!normalizedEmail || !normalizedPassword) return null;
+  return { email: normalizedEmail, password: normalizedPassword };
+}
+
+export function validateCustomerRegistration(body) {
+  const credentials = validateCustomerCredentials(body);
+  const normalizedName = displayName(body?.displayName);
+  if (!credentials || !normalizedName) return null;
+  return { ...credentials, displayName: normalizedName };
+}
+
+export function publicCustomer(customer) {
+  return {
+    id: customer.id,
+    email: customer.email,
+    displayName: customer.displayName,
+    mobilePhone: customer.mobilePhone ?? null,
+    documentLast4: customer.documentLast4 ?? null,
+    createdAt: customer.createdAt ?? null,
+  };
+}
