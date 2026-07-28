@@ -1,4 +1,5 @@
 export const MAX_INTEREST_FREE_INSTALLMENTS = 10;
+export const MAX_PIX_INSTALLMENTS = 6;
 export const MIN_INSTALLMENT_CENTS = 500;
 
 export function createInterestFreeInstallments(

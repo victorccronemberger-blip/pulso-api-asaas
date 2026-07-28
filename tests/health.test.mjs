@@ -62,6 +62,7 @@ test("reports a healthy API while keeping checkout disabled without Asaas creden
     methods: [],
     cardMode: "hosted_invoice",
     pixInstallmentMode: "monthly_manual_payment",
+    pixInstallmentMaximum: 6,
     pixAutomatic: false,
   });
 });
@@ -292,6 +293,7 @@ test("returns ten server-authoritative interest-free installment options", async
   assert.equal(response.status, 200);
   const result = await response.json();
   assert.equal(result.maximumInstallments, 10);
+  assert.equal(result.maximumPixInstallments, 6);
   assert.equal(result.interestFree, true);
   assert.equal(result.installments.length, 10);
   assert.deepEqual(result.installments[9], {
@@ -300,6 +302,25 @@ test("returns ten server-authoritative interest-free installment options", async
     installmentCents: 9_731,
     interestFree: true,
   });
+});
+
+test("rejects Pix installment plans above six installments", async (context) => {
+  const asaasClient = {
+    findCustomersByDocument: async () => assert.fail("Asaas must not be called"),
+  };
+  const origin = await serve(context, enabledEnvironment, { asaasClient });
+  const response = await fetch(`${origin}/v1/checkout/orders`, {
+    method: "POST",
+    headers: requestHeaders(),
+    body: JSON.stringify({
+      slugs: ["novo-cpa"],
+      couponCode: "PULSO35",
+      buyer: buyer(),
+      payment: { method: "pix_installment", installments: 7 },
+    }),
+  });
+  assert.equal(response.status, 400);
+  assert.equal((await response.json()).error, "invalid_installments");
 });
 
 test("rejects raw card fields and invalid catalog data before calling Asaas", async (context) => {

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   MAX_INTEREST_FREE_INSTALLMENTS,
+  MAX_PIX_INSTALLMENTS,
   createInterestFreeInstallments,
   interestFreeInstallment,
 } from "../domain/installments.js";
@@ -66,10 +67,13 @@ function parsePayment(input) {
     throw new CheckoutInputError("Meio de pagamento inválido.");
   }
   const installments = Number(input.installments);
+  const maximum = input.method === "pix_installment"
+    ? MAX_PIX_INSTALLMENTS
+    : MAX_INTEREST_FREE_INSTALLMENTS;
   if (
     !Number.isSafeInteger(installments)
     || installments < (input.method === "pix_installment" ? 2 : 1)
-    || installments > MAX_INTEREST_FREE_INSTALLMENTS
+    || installments > maximum
   ) {
     throw new CheckoutInputError("Número de parcelas inválido.", "invalid_installments");
   }
@@ -215,6 +219,7 @@ export function createCheckoutRouter(express, { environment, asaasClient, store 
       methods: environment.checkoutEnabled ? ["pix", "pix_installment", "credit_card"] : [],
       cardMode: "hosted_invoice",
       pixInstallmentMode: "monthly_manual_payment",
+      pixInstallmentMaximum: MAX_PIX_INSTALLMENTS,
       pixAutomatic: false,
     });
   });
@@ -231,6 +236,7 @@ export function createCheckoutRouter(express, { environment, asaasClient, store 
     response.json({
       baseTotalCents: quote.totalCents,
       maximumInstallments: MAX_INTEREST_FREE_INSTALLMENTS,
+      maximumPixInstallments: MAX_PIX_INSTALLMENTS,
       interestFree: true,
       installments: createInterestFreeInstallments(quote.totalCents),
     });
