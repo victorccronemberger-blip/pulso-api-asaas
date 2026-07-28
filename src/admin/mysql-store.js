@@ -490,6 +490,21 @@ export function createMySqlStore(databaseUrl) {
       const orders=await this.listCustomerOrders(customerId,{limit:100});
       return orders.find((order)=>order.id===orderId)??null;
     },
+    async getCustomerOrderByProviderOrderId(customerId,provider,providerOrderId) {
+      await ensureSchema();
+      const [[row]]=await pool.query(
+        `SELECT id,provider,provider_order_id AS providerOrderId,status,payment_method AS paymentMethod,
+         installments,installment_cents AS installmentCents,total_cents AS totalCents
+         FROM orders WHERE customer_id=? AND provider=? AND provider_order_id=? LIMIT 1`,
+        [customerId,provider,providerOrderId],
+      );
+      return row ? {
+        ...row,
+        installments:Number(row.installments ?? 0),
+        installmentCents:row.installmentCents===null?null:Number(row.installmentCents),
+        totalCents:Number(row.totalCents),
+      } : null;
+    },
     async getCustomerOrderForSync(customerId,orderId) {
       await ensureSchema();
       const [[row]]=await pool.query(

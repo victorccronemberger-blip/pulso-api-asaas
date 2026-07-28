@@ -241,6 +241,80 @@ test("creates a finite Pix installment plan without increasing the customer tota
   assert.equal("value" in payment, false);
 });
 
+test("recovers a Pix QR Code without creating a second charge", async (context) => {
+  let paymentCalls = 0;
+  let qrCalls = 0;
+  const asaasClient = {
+    findCustomersByDocument: async () => ({ data: [{ id: "cus_pix_recovery" }] }),
+    createCustomer: async () => assert.fail("Existing customer must be reused"),
+    createPayment: async (payload) => {
+      paymentCalls += 1;
+      return {
+        id: "pay_pix_recovery",
+        status: "PENDING",
+        billingType: "PIX",
+        value: 750,
+        dueDate: "2026-07-29",
+        description: "CPA 2026",
+        externalReference: payload.externalReference,
+        invoiceUrl: "https://sandbox.asaas.com/i/recovery",
+      };
+    },
+    updatePayment: async (id) => ({
+      id,
+      status: "PENDING",
+      billingType: "PIX",
+      value: 750,
+      dueDate: "2026-07-29",
+      invoiceUrl: "https://sandbox.asaas.com/i/recovery",
+    }),
+    getPayment: async (id) => ({ id, status: "PENDING" }),
+    getPixQrCode: async () => {
+      qrCalls += 1;
+      if (qrCalls === 1) throw Object.assign(new Error("not ready"), { status: 404 });
+      return { encodedImage: "aW1hZ2U=", payload: "000201RECOVERED", expirationDate: "2026-07-29" };
+    },
+  };
+  const origin = await serve(context, enabledEnvironment, { asaasClient });
+  const headers = await authenticatedHeaders(origin);
+  const response = await fetch(`${origin}/v1/checkout/orders`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      slugs: ["novo-cpa"],
+      couponCode: null,
+      buyer: buyer(),
+      payment: { method: "pix" },
+    }),
+  });
+  assert.equal(response.status, 201);
+  assert.deepEqual(await response.json(), {
+    orderId: "pay_pix_recovery",
+    status: "open",
+    method: "pix",
+    installments: 1,
+    installmentCents: 75_000,
+    totalCents: 75_000,
+    pixPending: true,
+  });
+
+  const recovery = await fetch(`${origin}/v1/checkout/orders/pay_pix_recovery/pix`, {
+    headers: { cookie: headers.cookie },
+  });
+  assert.equal(recovery.status, 200);
+  assert.deepEqual(await recovery.json(), {
+    id: "pay_pix_recovery",
+    status: "open",
+    pix: {
+      qrCodeBase64: "aW1hZ2U=",
+      emv: "000201RECOVERED",
+      expiresAt: "2026-07-29",
+    },
+  });
+  assert.equal(paymentCalls, 1);
+  assert.equal(qrCalls, 2);
+});
+
 test("creates a ten-installment hosted Asaas invoice without receiving card data", async (context) => {
   const calls = [];
   const asaasClient = {

@@ -240,6 +240,16 @@ function paymentCallbackPayload(providerPayment, successUrl) {
   return payload;
 }
 
+function publicPixInstructions(pix) {
+  if (typeof pix?.encodedImage !== "string" || typeof pix?.payload !== "string") return null;
+  if (!pix.encodedImage.trim() || !pix.payload.trim()) return null;
+  return {
+    qrCodeBase64: pix.encodedImage,
+    emv: pix.payload,
+    expiresAt: pix.expirationDate ?? null,
+  };
+}
+
 export function createCheckoutRouter(express, {
   environment,
   asaasClient,
@@ -461,9 +471,15 @@ export function createCheckoutRouter(express, {
       }
 
       if (payment.method === "pix" || payment.method === "pix_installment") {
-        const pix = await asaasClient.getPixQrCode(orderId);
-        if (typeof pix?.encodedImage !== "string" || typeof pix?.payload !== "string") {
-          throw new Error("Asaas returned incomplete Pix instructions.");
+        let pix = null;
+        try {
+          pix = publicPixInstructions(await asaasClient.getPixQrCode(orderId));
+        } catch (pixError) {
+          console.error("Asaas Pix instructions are still being prepared", {
+            orderId,
+            status: pixError?.status,
+            code: pixError?.code,
+          });
         }
         result = {
           status: 201,
@@ -474,7 +490,7 @@ export function createCheckoutRouter(express, {
             installments: payment.installments,
             installmentCents: installment?.installmentCents ?? quote.totalCents,
             totalCents: quote.totalCents,
-            pix: { qrCodeBase64: pix.encodedImage, emv: pix.payload, expiresAt: pix.expirationDate ?? null },
+            ...(pix ? { pix } : { pixPending: true }),
           },
         };
       } else {
@@ -532,6 +548,63 @@ export function createCheckoutRouter(express, {
 
     await store.completeCheckoutAttempt(key, result);
     response.status(result.status).json(result.body);
+  });
+
+  router.get("/orders/:orderId/pix", limiter, async (request, response) => {
+    if (!requireProvider(response)) return;
+    response.set("Cache-Control", "no-store");
+    try {
+      const orderId = providerId(request.params.orderId);
+      const accountSession = await customerSessionFromRequest(
+        request,
+        store,
+        environment.sessionPepper,
+      );
+      if (!accountSession) {
+        response.status(401).json({
+          error: "customer_authentication_required",
+          message: "Entre na sua conta para abrir o Pix.",
+        });
+        return;
+      }
+      const localOrder = await store.getCustomerOrderByProviderOrderId(
+        accountSession.customer.id,
+        "asaas",
+        orderId,
+      );
+      if (!localOrder || !["pix", "pix_installment"].includes(localOrder.paymentMethod)) {
+        response.status(404).json({
+          error: "order_not_found",
+          message: "NÃ£o encontramos este Pix na sua conta.",
+        });
+        return;
+      }
+      const payment = await asaasClient.getPayment(orderId);
+      const status = normalizeAsaasPaymentStatus(payment?.status);
+      if (status === "paid") {
+        response.json({ id: orderId, status });
+        return;
+      }
+      try {
+        const pix = publicPixInstructions(await asaasClient.getPixQrCode(orderId));
+        if (pix) {
+          response.json({ id: orderId, status, pix });
+          return;
+        }
+      } catch (pixError) {
+        if (![400, 404, 409].includes(Number(pixError?.status))) throw pixError;
+      }
+      response.status(202).json({ id: orderId, status, pixPending: true });
+    } catch (error) {
+      console.error("Asaas Pix retrieval failed", {
+        endpoint: error?.endpoint,
+        status: error?.status,
+      });
+      response.status(error?.status === 404 ? 404 : 502).json({
+        error: "pix_retrieval_failed",
+        message: "O Pix foi criado, mas o QR Code ainda nÃ£o estÃ¡ disponÃ­vel. Tente novamente em instantes.",
+      });
+    }
   });
 
   router.get("/orders/:orderId", limiter, async (request, response) => {
