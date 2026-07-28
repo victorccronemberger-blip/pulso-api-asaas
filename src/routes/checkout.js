@@ -221,7 +221,13 @@ export function createCheckoutRouter(express, {
       maximum: MAX_PIX_INSTALLMENTS,
     })
       .filter((option) => option.number >= 2)
-      .map(({ interestFree: _interestFree, ...option }) => option);
+      .map((option) => ({
+        number: option.number,
+        totalCents: option.totalCents,
+        installmentCents: option.installmentCents,
+        lastInstallmentCents: option.lastInstallmentCents,
+        installmentAmountsCents: option.installmentAmountsCents,
+      }));
     response.json({
       baseTotalCents: quote.totalCents,
       maximumInstallments: MAX_INTEREST_FREE_INSTALLMENTS,
