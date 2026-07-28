@@ -30,7 +30,7 @@ export function createAsaasWebhookHandler({ environment, store }) {
     const externalReference = String(payment?.externalReference ?? "").trim();
     if (
       !/^PAYMENT_[A-Z_]+$/.test(event)
-      || !/^[A-Za-z0-9_-]{6,128}$/.test(eventId)
+      || !/^[A-Za-z0-9_&.-]{6,128}$/.test(eventId)
       || !orderId
       || !externalReference.startsWith("pulso:")
     ) {

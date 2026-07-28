@@ -254,7 +254,7 @@ test("allows a safe retry with the same idempotency key before an Asaas charge e
 test("authenticates and deduplicates Asaas payment webhooks", async (context) => {
   const origin = await serve(context, enabledEnvironment, { asaasClient: {} });
   const event = {
-    id: "evt_payment_6001",
+    id: "evt_payment_6001&17558216",
     event: "PAYMENT_CONFIRMED",
     payment: {
       id: "pay_pulso6001",
