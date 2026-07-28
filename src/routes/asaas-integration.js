@@ -13,7 +13,7 @@ function paymentId(value) {
   return /^[A-Za-z0-9_-]{6,80}$/.test(id) ? id : null;
 }
 
-export function createAsaasWebhookHandler({ environment, store }) {
+export function createAsaasWebhookHandler({ environment, store, onAccessGranted }) {
   return async function asaasWebhook(request, response) {
     if (!environment.asaasWebhookToken) {
       response.status(503).json({ error: "webhook_not_configured" });
@@ -42,6 +42,7 @@ export function createAsaasWebhookHandler({ environment, store }) {
 
     try {
       let persisted;
+      let accessGrantedNow = false;
       if (providerGroupId) {
         const installment = normalizeProviderInstallment(payment);
         if (!installment) {
@@ -55,6 +56,7 @@ export function createAsaasWebhookHandler({ environment, store }) {
           installment,
           eventId,
         });
+        accessGrantedNow = persisted?.accessGrantedNow === true;
       } else {
         persisted = await store.updateOrderFromWebhook({
           provider: "asaas",
@@ -63,8 +65,17 @@ export function createAsaasWebhookHandler({ environment, store }) {
           status: normalizeAsaasPaymentStatus(payment?.status),
           eventId,
         });
+        accessGrantedNow = persisted?.status === "paid" && persisted?.previousStatus !== "paid";
       }
       response.status(200).json({ received: true, duplicate: Boolean(persisted?.duplicate) });
+      if (accessGrantedNow && persisted?.id && onAccessGranted) {
+        onAccessGranted(persisted.id).catch((error) => {
+          console.error("Could not enqueue enrollment for granted order", {
+            orderId: persisted.id,
+            type: error?.name,
+          });
+        });
+      }
     } catch (error) {
       console.error("Could not persist Asaas webhook", {
         event,

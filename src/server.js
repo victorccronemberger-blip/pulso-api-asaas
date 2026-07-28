@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createApp } from "./application.js";
 
-const { app, environment, ready, store } = createApp();
+const { app, environment, ready, store, artIntegration } = createApp();
 const server = app.listen(environment.port, environment.host, () => {
   console.log(`PULSO API listening on ${environment.host}:${environment.port}`);
   if (environment.asaasApiKey) {
@@ -30,6 +30,14 @@ ready
 function shutdown(signal) {
   console.log(`PULSO API received ${signal}.`);
   server.close(async (error) => {
+    try {
+      if (artIntegration) await artIntegration.queue.shutdown();
+    } catch (queueError) {
+      console.error("PULSO API could not drain the enrollment queue.", {
+        type: queueError?.name,
+      });
+      error ??= queueError;
+    }
     try {
       await store.close();
     } catch (closeError) {

@@ -19,3 +19,13 @@ export const adminCatalog = Object.freeze(products.map((product) => Object.freez
 export function getCheckoutProduct(slug) {
   return checkoutCatalog[slug] ?? null;
 }
+
+// Traduz o slug de checkout para a tag do curso na plataforma ART. É o elo entre o
+// pedido pago e a matrícula: cada item de pedido vira um job cuja tag vem daqui.
+const sourceTagBySlug = Object.freeze(
+  Object.fromEntries(products.map((product) => [product.slug, product.sourceTag])),
+);
+
+export function getSourceTag(slug) {
+  return sourceTagBySlug[slug] ?? null;
+}

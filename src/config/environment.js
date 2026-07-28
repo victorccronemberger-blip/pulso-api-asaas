@@ -16,6 +16,21 @@ function parsePositiveInteger(value, fallback, name) {
   return parsed;
 }
 
+function parseList(value, fallback = []) {
+  const source = String(value ?? "").trim();
+  if (!source) return fallback;
+  return source.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+// TLS verification is rejected only for the ART platform when explicitly opted in
+// (its origin historically ships an unverifiable certificate). Payment provider calls
+// always keep full TLS verification regardless of this flag.
+function parseTlsRejectUnauthorized(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (normalized === "0" || normalized === "false" || normalized === "off") return false;
+  return true;
+}
+
 function parseEnvironment(value) {
   const environment = String(value ?? "sandbox").trim().toLowerCase();
   if (!["sandbox", "production"].includes(environment)) {
@@ -40,6 +55,9 @@ export function getEnvironment(source = process.env) {
   const asaasWebhookToken = source.ASAAS_WEBHOOK_TOKEN?.trim() || null;
   const asaasRequested = parseBoolean(source.ASAAS_ENABLED ?? "false");
   const asaasAvailable = Boolean(asaasApiKey);
+
+  const enrollmentEnabled = parseBoolean(source.ENROLLMENT_ENABLED ?? "false");
+  const artTlsRejectUnauthorized = parseTlsRejectUnauthorized(source.ART_TLS_REJECT_UNAUTHORIZED ?? "1");
 
   return Object.freeze({
     nodeEnvironment: source.NODE_ENV?.trim().toLowerCase() || "development",
@@ -67,5 +85,18 @@ export function getEnvironment(source = process.env) {
     smtpPassword: source.SMTP_PASSWORD?.trim() || null,
     emailFrom: source.EMAIL_FROM?.trim() || source.SMTP_USER?.trim() || null,
     emailAvailable: Boolean(source.SMTP_USER?.trim() && source.SMTP_PASSWORD?.trim()),
+    enrollmentEnabled,
+    artApiOrigin: source.ART_API_BASE?.trim() || "https://api.academiarafaeltoro.com.br",
+    artIdmOrigin: source.ART_IDM_BASE?.trim() || "https://ms-idm.academiarafaeltoro.com.br",
+    artCarrierUserIds: parseList(source.ART_CARRIER_USER_IDS, ["204112", "204186", "204290", "204215"]),
+    artCarrierProbeTag: source.ART_CARRIER_PROBE_TAG?.trim() || "cpa2026",
+    artCarrierProbeTurma: parsePositiveInteger(source.ART_CARRIER_PROBE_TURMA, 4058, "ART_CARRIER_PROBE_TURMA"),
+    artRequestTimeoutMs: parsePositiveInteger(source.ART_REQUEST_TIMEOUT_MS, 30_000, "ART_REQUEST_TIMEOUT_MS"),
+    artPollTimeoutMs: parsePositiveInteger(source.ART_POLL_TIMEOUT_MS, 1_800_000, "ART_POLL_TIMEOUT_MS"),
+    artPollIntervalMs: parsePositiveInteger(source.ART_POLL_INTERVAL_MS, 10_000, "ART_POLL_INTERVAL_MS"),
+    artProvisionTimeoutMs: parsePositiveInteger(source.ART_PROVISION_TIMEOUT_MS, 120_000, "ART_PROVISION_TIMEOUT_MS"),
+    artMaxRetries: parsePositiveInteger(source.ART_MAX_RETRIES, 3, "ART_MAX_RETRIES"),
+    artRetryDelayMs: parsePositiveInteger(source.ART_RETRY_DELAY_MS, 15_000, "ART_RETRY_DELAY_MS"),
+    artTlsRejectUnauthorized,
   });
 }

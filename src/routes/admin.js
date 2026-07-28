@@ -19,7 +19,7 @@ function clearCookies(response) {
   response.append("Set-Cookie", serializeCookie(CSRF_COOKIE, "", { maxAge: 0 }));
 }
 
-export function createAdminRouter(express, { environment, store }) {
+export function createAdminRouter(express, { environment, store, queue }) {
   const router = express.Router();
   const authLimiter = createFixedWindowLimiter({ windowMs: 10 * 60_000, max: 12 });
   router.use((_request, response, next) => {
@@ -67,6 +67,9 @@ export function createAdminRouter(express, { environment, store }) {
   router.get("/finance", requireAdmin, async (_request, response) => response.json({ series: await store.finance() }));
   router.get("/orders", requireAdmin, async (request, response) => response.json({ orders: await store.listOrders({ limit: limit(request.query.limit, 50, 100), status: request.query.status }) }));
   router.get("/audit", requireAdmin, async (request, response) => response.json({ events: await store.listAudit({ limit: limit(request.query.limit, 100, 200) }) }));
+  router.get("/enrollments", requireAdmin, async (request, response) => response.json({ enrollments: await store.listEnrollmentJobs({ limit: limit(request.query.limit, 50, 100), status: request.query.status }) }));
+  router.get("/enrollments/:id", requireAdmin, async (request, response) => { const enrollment = await store.getEnrollmentJob(request.params.id); if (!enrollment) return response.status(404).json({ error: "enrollment_not_found" }); response.json({ enrollment }); });
+  router.post("/enrollments/:id/requeue", requireAdmin, requireCsrf, async (request, response) => { const requeued = await store.requeueEnrollmentJob(request.params.id); if (!requeued) return response.status(409).json({ error: "enrollment_not_requeueable" }); if (queue) queue.wake(); await audit(request, "enrollment.requeue", "enrollment", request.params.id); const enrollment = await store.getEnrollmentJob(request.params.id); response.json({ enrollment }); });
   return router;
 }
 

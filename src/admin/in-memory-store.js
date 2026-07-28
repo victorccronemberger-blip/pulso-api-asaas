@@ -29,7 +29,7 @@ const customerOrder = (order) => order && ({
 });
 
 export function createInMemoryStore() {
-  const admins = new Map(); const sessions = new Map(); const customers = new Map(); const customerSessions = new Map(); const customerActionTokens = new Map(); const coupons = new Map(); const orders = new Map(); const installmentsByOrder = new Map(); const audits = []; const events = new Set(); const attempts = new Map(); const reservations = new Map();
+  const admins = new Map(); const sessions = new Map(); const customers = new Map(); const customerSessions = new Map(); const customerActionTokens = new Map(); const coupons = new Map(); const orders = new Map(); const installmentsByOrder = new Map(); const enrollments = new Map(); const audits = []; const events = new Set(); const attempts = new Map(); const reservations = new Map();
   let campaign = { activeCouponCode: null, headline: null };
 
   function findOrderById(orderId) {
@@ -147,5 +147,14 @@ export function createInMemoryStore() {
     async getCustomerOrder(customerId, orderId) { return copy(customerOrder([...orders.values()].find((order) => order.customerId === customerId && order.id === orderId) ?? null)); },
     async getCustomerOrderForSync(customerId, orderId) { const order = findOrderById(orderId); return order?.customerId === customerId ? copy({ id:order.id,status:order.status,paymentMethod:order.paymentMethod,installments:order.installments,providerGroupId:order.providerGroupId }) : null; },
     async listAudit({ limit = 100 } = {}) { return copy(audits.slice(0, limit)); },
+    async getOrderWithItems(orderId) { const order = findOrderById(orderId); if (!order) return null; return { id: order.id, buyerEmail: order.buyerEmail ?? null, buyerCpf: order.buyerCpf ?? null, buyerName: order.buyerName ?? null, items: (order.lines ?? []).map((line, index) => ({ id: index + 1, courseSlug: line.slug ?? line.product?.slug, title: line.title ?? line.product?.title })) }; },
+    async createEnrollmentJob(job) { for (const e of enrollments.values()) if (e.orderId === job.orderId && e.courseSlug === job.courseSlug) return null; const value = { id: randomUUID(), orderId: job.orderId, orderItemId: job.orderItemId ?? null, courseSlug: job.courseSlug, sourceTag: job.sourceTag, status: "queued", attempts: 0, idTurma: null, turmaSelection: null, userId: null, result: null, error: null, buyerEmail: job.buyerEmail ?? null, buyerCpf: job.buyerCpf ?? null, buyerName: job.buyerName ?? null, createdAt: now(), updatedAt: now() }; enrollments.set(value.id, value); return value.id; },
+    async listPendingEnrollmentJobs() { return copy([...enrollments.values()].filter((e) => e.status === "queued").sort((a, b) => a.createdAt.localeCompare(b.createdAt))); },
+    async claimEnrollmentJob(enrollmentId) { const e = enrollments.get(enrollmentId); if (!e || e.status !== "queued") return false; e.status = "processing"; e.attempts += 1; e.updatedAt = now(); return true; },
+    async finishEnrollmentJob(enrollmentId, patch) { const e = enrollments.get(enrollmentId); if (!e) return; e.status = patch.status; e.idTurma = patch.idTurma ?? null; e.turmaSelection = patch.turmaSelection ?? null; e.userId = patch.userId ?? null; e.result = patch.result ?? null; e.error = patch.error ?? null; e.updatedAt = now(); },
+    async requeueEnrollmentJob(enrollmentId) { const e = enrollments.get(enrollmentId); if (!e || !["failed", "not_created", "pending"].includes(e.status)) return false; e.status = "queued"; e.error = null; e.updatedAt = now(); return true; },
+    async recoverStaleEnrollments() { let count = 0; for (const e of enrollments.values()) if (e.status === "processing") { e.status = "queued"; count += 1; } return count; },
+    async listEnrollmentJobs({ limit = 50, status } = {}) { return copy([...enrollments.values()].filter((e) => !status || e.status === status).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, limit)); },
+    async getEnrollmentJob(enrollmentId) { return copy(enrollments.get(enrollmentId) ?? null); },
   };
 }
