@@ -1,6 +1,8 @@
 export const MAX_INTEREST_FREE_INSTALLMENTS = 10;
 export const MAX_PIX_INSTALLMENTS = 6;
-export const MIN_INSTALLMENT_CENTS = 500;
+export const MIN_CARD_INSTALLMENT_CENTS = 500;
+export const MIN_PIX_INSTALLMENT_CENTS = 1_000;
+export const MIN_INSTALLMENT_CENTS = MIN_CARD_INSTALLMENT_CENTS;
 
 export function allocateInstallmentCents(totalCents, count) {
   if (
@@ -35,6 +37,7 @@ export function createInterestFreeInstallments(
   const safeMinimum = Number.isSafeInteger(minimumInstallmentCents)
     ? Math.max(1, minimumInstallmentCents)
     : MIN_INSTALLMENT_CENTS;
+  if (totalCents < safeMinimum) return [];
   const availableMaximum = Math.max(1, Math.min(safeMaximum, Math.floor(totalCents / safeMinimum)));
 
   return Array.from({ length: availableMaximum }, (_, index) => {
@@ -51,7 +54,7 @@ export function createInterestFreeInstallments(
   });
 }
 
-export function interestFreeInstallment(totalCents, number) {
-  return createInterestFreeInstallments(totalCents)
+export function interestFreeInstallment(totalCents, number, options) {
+  return createInterestFreeInstallments(totalCents, options)
     .find((option) => option.number === number) ?? null;
 }

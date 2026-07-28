@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import {
   MAX_INTEREST_FREE_INSTALLMENTS,
   MAX_PIX_INSTALLMENTS,
+  MIN_CARD_INSTALLMENT_CENTS,
+  MIN_PIX_INSTALLMENT_CENTS,
   createInterestFreeInstallments,
   interestFreeInstallment,
 } from "../domain/installments.js";
@@ -27,6 +29,46 @@ function cleanDigits(value, min, max, label) {
   return digits;
 }
 
+function hasRepeatedDigits(value) {
+  return /^(\d)\1+$/.test(value);
+}
+
+function isValidCpf(value) {
+  if (value.length !== 11 || hasRepeatedDigits(value)) return false;
+  const calculateDigit = (length) => {
+    let sum = 0;
+    for (let index = 0; index < length; index += 1) {
+      sum += Number(value[index]) * (length + 1 - index);
+    }
+    const remainder = (sum * 10) % 11;
+    return remainder === 10 ? 0 : remainder;
+  };
+  return calculateDigit(9) === Number(value[9])
+    && calculateDigit(10) === Number(value[10]);
+}
+
+function isValidCnpj(value) {
+  if (value.length !== 14 || hasRepeatedDigits(value)) return false;
+  const calculateDigit = (length) => {
+    const weights = length === 12
+      ? [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]
+      : [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+    const sum = weights.reduce((total, weight, index) => total + Number(value[index]) * weight, 0);
+    const remainder = sum % 11;
+    return remainder < 2 ? 0 : 11 - remainder;
+  };
+  return calculateDigit(12) === Number(value[12])
+    && calculateDigit(13) === Number(value[13]);
+}
+
+function cleanDocument(value) {
+  const document = cleanDigits(value, 11, 14, "CPF ou CNPJ");
+  if (!isValidCpf(document) && !isValidCnpj(document)) {
+    throw new CheckoutInputError("CPF ou CNPJ inválido.", "invalid_document");
+  }
+  return document;
+}
+
 function cleanText(value, min, max, label) {
   const text = String(value ?? "").trim().replace(/\s+/g, " ");
   if (text.length < min || text.length > max) {
@@ -49,9 +91,31 @@ function parseBuyer(input, requestIp) {
     name: `${cleanText(input.firstName, 2, 80, "Nome")} ${cleanText(input.lastName, 2, 100, "Sobrenome")}`,
     email,
     mobilePhone: cleanDigits(input.phone, 10, 13, "Telefone"),
-    cpfCnpj: cleanDigits(input.documentNumber, 11, 14, "CPF ou CNPJ"),
+    cpfCnpj: cleanDocument(input.documentNumber),
     ip,
   };
+}
+
+function validateMinimumCharge(totalCents, payment) {
+  const pixMethod = payment.method === "pix" || payment.method === "pix_installment";
+  const minimumInstallmentCents = pixMethod
+    ? MIN_PIX_INSTALLMENT_CENTS
+    : MIN_CARD_INSTALLMENT_CENTS;
+  const minimumTotalCents = minimumInstallmentCents * payment.installments;
+  if (totalCents >= minimumTotalCents) return;
+
+  if (payment.method === "pix") {
+    throw new CheckoutInputError(
+      "O valor mínimo para pagamento por Pix é R$ 10,00. Ajuste o cupom ou adicione outro curso.",
+      "payment_amount_below_minimum",
+    );
+  }
+  const methodLabel = payment.method === "pix_installment" ? "Pix" : "cartão";
+  const minimum = (minimumInstallmentCents / 100).toFixed(2).replace(".", ",");
+  throw new CheckoutInputError(
+    `Cada parcela no ${methodLabel} precisa ter no mínimo R$ ${minimum}. Escolha menos parcelas ou ajuste o cupom.`,
+    "payment_amount_below_minimum",
+  );
 }
 
 function parsePayment(input) {
@@ -204,6 +268,8 @@ export function createCheckoutRouter(express, {
       pixInstallmentMode: "monthly_manual_payment",
       pixInstallmentMaximum: MAX_PIX_INSTALLMENTS,
       pixAutomatic: false,
+      minimumPixInstallmentCents: MIN_PIX_INSTALLMENT_CENTS,
+      minimumCardInstallmentCents: MIN_CARD_INSTALLMENT_CENTS,
     });
   });
 
@@ -219,6 +285,7 @@ export function createCheckoutRouter(express, {
     const cardInstallments = createInterestFreeInstallments(quote.totalCents);
     const pixInstallments = createInterestFreeInstallments(quote.totalCents, {
       maximum: MAX_PIX_INSTALLMENTS,
+      minimumInstallmentCents: MIN_PIX_INSTALLMENT_CENTS,
     })
       .filter((option) => option.number >= 2)
       .map((option) => ({
@@ -277,6 +344,12 @@ export function createCheckoutRouter(express, {
       });
       return;
     }
+    try {
+      validateMinimumCharge(quote.totalCents, payment);
+    } catch (error) {
+      if (handleInputError(error, response)) return;
+      throw error;
+    }
 
     const fingerprint = checkoutFingerprint(request.body, accountSession.customer.id);
     const attempt = await store.beginCheckoutAttempt(key, fingerprint);
@@ -312,7 +385,11 @@ export function createCheckoutRouter(express, {
     let persistedOrderId = null;
     let result;
     try {
-      const installment = interestFreeInstallment(quote.totalCents, payment.installments);
+      const installment = interestFreeInstallment(quote.totalCents, payment.installments, {
+        minimumInstallmentCents: payment.method === "credit_card"
+          ? MIN_CARD_INSTALLMENT_CENTS
+          : MIN_PIX_INSTALLMENT_CENTS,
+      });
       if (payment.installments > 1 && !installment) {
         throw new CheckoutInputError("O parcelamento escolhido não está disponível.", "invalid_installments");
       }

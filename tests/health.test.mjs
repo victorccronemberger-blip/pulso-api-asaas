@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createApp } from "../src/application.js";
+import { createInMemoryStore } from "../src/admin/in-memory-store.js";
 
 const enabledEnvironment = {
   ASAAS_ENABLED: "true",
@@ -81,6 +82,8 @@ test("reports a healthy API while keeping checkout disabled without Asaas creden
     pixInstallmentMode: "monthly_manual_payment",
     pixInstallmentMaximum: 6,
     pixAutomatic: false,
+    minimumPixInstallmentCents: 1000,
+    minimumCardInstallmentCents: 500,
   });
 });
 
@@ -351,6 +354,62 @@ test("rejects Pix installment plans above six installments", async (context) => 
   });
   assert.equal(response.status, 400);
   assert.equal((await response.json()).error, "invalid_installments");
+});
+
+test("rejects invalid CPF or CNPJ before calling Asaas", async (context) => {
+  const asaasClient = {
+    findCustomersByDocument: async () => assert.fail("Asaas must not be called"),
+  };
+  const origin = await serve(context, enabledEnvironment, { asaasClient });
+  const response = await fetch(`${origin}/v1/checkout/orders`, {
+    method: "POST",
+    headers: requestHeaders(),
+    body: JSON.stringify({
+      slugs: ["novo-cpa"],
+      couponCode: null,
+      buyer: { ...buyer(), documentNumber: "45487468111" },
+      payment: { method: "pix" },
+    }),
+  });
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), {
+    error: "invalid_document",
+    message: "CPF ou CNPJ inválido.",
+    retryable: true,
+  });
+});
+
+test("rejects coupons that reduce a Pix charge below the Asaas minimum", async (context) => {
+  const store = createInMemoryStore();
+  await store.saveCoupon({
+    code: "QUASE100",
+    discountBps: 9_999,
+    active: true,
+    startsAt: null,
+    endsAt: null,
+    maxRedemptions: null,
+    productSlugs: ["novo-cpa"],
+  });
+  const asaasClient = {
+    findCustomersByDocument: async () => assert.fail("Asaas must not be called"),
+  };
+  const origin = await serve(context, enabledEnvironment, { store, asaasClient });
+  const response = await fetch(`${origin}/v1/checkout/orders`, {
+    method: "POST",
+    headers: await authenticatedHeaders(origin),
+    body: JSON.stringify({
+      slugs: ["novo-cpa"],
+      couponCode: "QUASE100",
+      buyer: buyer(),
+      payment: { method: "pix" },
+    }),
+  });
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), {
+    error: "payment_amount_below_minimum",
+    message: "O valor mínimo para pagamento por Pix é R$ 10,00. Ajuste o cupom ou adicione outro curso.",
+    retryable: true,
+  });
 });
 
 test("rejects raw card fields and invalid catalog data before calling Asaas", async (context) => {
