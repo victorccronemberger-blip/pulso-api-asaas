@@ -14,8 +14,11 @@ import {
 } from "../customer/session.js";
 import {
   publicCustomer,
+  validateCustomerActionToken,
   validateCustomerCredentials,
+  validateCustomerEmail,
   validateCustomerPasswordChange,
+  validateCustomerPasswordReset,
   validateCustomerProfile,
   validateCustomerRegistration,
 } from "../customer/validation.js";
@@ -25,6 +28,7 @@ import { publicInstallmentPlan } from "../services/installment-service.js";
 const ORDER_ID = /^[0-9a-f-]{36}$/i;
 
 export function createCustomerRouter(express, {
+  customerMailer,
   environment,
   installmentService,
   store,
@@ -81,6 +85,22 @@ export function createCustomerRouter(express, {
     return csrfToken;
   }
 
+  async function issueActionToken(customer, kind, ttlMilliseconds) {
+    const token = randomToken();
+    await store.createCustomerActionToken({
+      customerId: customer.id,
+      kind,
+      tokenHash: tokenHash(token, pepper),
+      expiresAt: Date.now() + ttlMilliseconds,
+    });
+    return token;
+  }
+
+  async function sendVerification(customer) {
+    const token = await issueActionToken(customer, "verify_email", 24 * 60 * 60_000);
+    await customerMailer.sendEmailVerification({ customer, token });
+  }
+
   router.post("/register", limiter, async (request, response) => {
     const input = validateCustomerRegistration(request.body);
     if (!input) {
@@ -115,11 +135,100 @@ export function createCustomerRouter(express, {
       return;
     }
     const csrfToken = await createSession(response, customer.id);
+    if (customerMailer.available) {
+      sendVerification(customer).catch((error) => {
+        console.error("Could not send customer email verification", {
+          customerId: customer.id,
+          type: error?.name,
+        });
+      });
+    }
     response.status(201).json({
       authenticated: true,
       csrfToken,
       customer: publicCustomer(customer),
     });
+  });
+
+  router.post("/password/forgot", limiter, async (request, response) => {
+    const input = validateCustomerEmail(request.body);
+    if (!input) {
+      response.status(400).json({
+        error: "invalid_email",
+        message: "Informe um e-mail válido.",
+      });
+      return;
+    }
+    if (!customerMailer.available) {
+      response.status(503).json({
+        error: "transactional_email_unavailable",
+        message: "A recuperação por e-mail está temporariamente indisponível.",
+      });
+      return;
+    }
+    const customer = await store.getCustomerByEmail(input.email);
+    if (customer) {
+      try {
+        const token = await issueActionToken(customer, "reset_password", 30 * 60_000);
+        await customerMailer.sendPasswordReset({ customer, token });
+      } catch (error) {
+        console.error("Could not send customer password reset", {
+          customerId: customer.id,
+          type: error?.name,
+        });
+      }
+    }
+    response.status(202).json({
+      accepted: true,
+      message: "Se o e-mail estiver cadastrado, você receberá um link de recuperação.",
+    });
+  });
+
+  router.post("/password/reset", limiter, async (request, response) => {
+    const input = validateCustomerPasswordReset(request.body);
+    if (!input) {
+      response.status(400).json({
+        error: "invalid_password_reset",
+        message: "Use um link válido e uma senha com pelo menos 12 caracteres.",
+      });
+      return;
+    }
+    const action = await store.consumeCustomerActionToken({
+      kind: "reset_password",
+      tokenHash: tokenHash(input.token, pepper),
+    });
+    if (!action) {
+      response.status(400).json({
+        error: "expired_password_reset",
+        message: "Este link expirou ou já foi utilizado.",
+      });
+      return;
+    }
+    const credentials = await hashPassword(input.newPassword);
+    await store.updateCustomerPassword(action.customerId, {
+      passwordSalt: credentials.salt,
+      passwordHash: credentials.hash,
+    });
+    await store.markCustomerEmailVerified(action.customerId);
+    await store.revokeCustomerSessions(action.customerId);
+    response.json({ changed: true, reauthenticate: true });
+  });
+
+  router.post("/email-verification/confirm", limiter, async (request, response) => {
+    const token = validateCustomerActionToken(request.body);
+    const action = token ? await store.consumeCustomerActionToken({
+      kind: "verify_email",
+      tokenHash: tokenHash(token, pepper),
+    }) : null;
+    if (!action) {
+      response.status(400).json({
+        error: "expired_email_verification",
+        message: "Este link expirou ou já foi utilizado.",
+      });
+      return;
+    }
+    const customer = await store.markCustomerEmailVerified(action.customerId);
+    response.json({ verified: true, customer: publicCustomer(customer) });
   });
 
   router.post("/login", limiter, async (request, response) => {
@@ -163,6 +272,25 @@ export function createCustomerRouter(express, {
     if (token) await store.revokeCustomerSession(tokenHash(token, pepper));
     clearCustomerCookies(response);
     response.status(204).end();
+  });
+
+  router.post("/email-verification/request", limiter, async (request, response) => {
+    const session = await requireSession(request, response);
+    if (!session) return;
+    if (!requireCsrf(request, response, session)) return;
+    if (session.customer.emailVerifiedAt) {
+      response.json({ sent: false, alreadyVerified: true });
+      return;
+    }
+    if (!customerMailer.available) {
+      response.status(503).json({
+        error: "transactional_email_unavailable",
+        message: "A confirmação por e-mail está temporariamente indisponível.",
+      });
+      return;
+    }
+    await sendVerification(session.customer);
+    response.status(202).json({ sent: true });
   });
 
   router.patch("/profile", limiter, async (request, response) => {

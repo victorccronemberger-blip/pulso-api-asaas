@@ -68,7 +68,7 @@ test("reports a healthy API while keeping checkout disabled without Asaas creden
     status: "ok",
     service: "pulso-api",
     database: { status: "ready", error: null },
-    capabilities: { checkout: false },
+    capabilities: { checkout: false, transactionalEmail: false },
   });
 
   const status = await fetch(`${origin}/v1/checkout/status`);

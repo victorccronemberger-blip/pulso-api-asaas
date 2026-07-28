@@ -60,5 +60,12 @@ export function getEnvironment(source = process.env) {
     asaasWebhookToken,
     asaasAvailable,
     checkoutEnabled: asaasRequested && asaasAvailable,
+    smtpHost: source.SMTP_HOST?.trim() || "smtp.hostinger.com",
+    smtpPort: parsePositiveInteger(source.SMTP_PORT, 465, "SMTP_PORT"),
+    smtpSecure: parseBoolean(source.SMTP_SECURE ?? "true"),
+    smtpUser: source.SMTP_USER?.trim() || null,
+    smtpPassword: source.SMTP_PASSWORD?.trim() || null,
+    emailFrom: source.EMAIL_FROM?.trim() || source.SMTP_USER?.trim() || null,
+    emailAvailable: Boolean(source.SMTP_USER?.trim() && source.SMTP_PASSWORD?.trim()),
   });
 }

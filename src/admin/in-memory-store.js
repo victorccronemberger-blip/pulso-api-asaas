@@ -29,7 +29,7 @@ const customerOrder = (order) => order && ({
 });
 
 export function createInMemoryStore() {
-  const admins = new Map(); const sessions = new Map(); const customers = new Map(); const customerSessions = new Map(); const coupons = new Map(); const orders = new Map(); const installmentsByOrder = new Map(); const audits = []; const events = new Set(); const attempts = new Map(); const reservations = new Map();
+  const admins = new Map(); const sessions = new Map(); const customers = new Map(); const customerSessions = new Map(); const customerActionTokens = new Map(); const coupons = new Map(); const orders = new Map(); const installmentsByOrder = new Map(); const audits = []; const events = new Set(); const attempts = new Map(); const reservations = new Map();
   let campaign = { activeCouponCode: null, headline: null };
 
   function findOrderById(orderId) {
@@ -67,9 +67,12 @@ export function createInMemoryStore() {
     async getSession(tokenHash) { const item = sessions.get(tokenHash); if (!item || item.expiresAt < Date.now()) return null; const admin = [...admins.values()].find((row) => row.id === item.adminId); return admin ? copy({ ...item, admin }) : null; },
     async revokeSession(tokenHash) { sessions.delete(tokenHash); },
     async getCustomerByEmail(email) { return copy(customers.get(email) ?? null); },
-    async createCustomer(customer) { const value = { id: randomUUID(), mobilePhone: null, documentLast4: null, ...customer, createdAt: now() }; customers.set(value.email, value); return copy(value); },
+    async createCustomer(customer) { const value = { id: randomUUID(), mobilePhone: null, documentLast4: null, emailVerifiedAt: null, ...customer, createdAt: now() }; customers.set(value.email, value); return copy(value); },
     async updateCustomerProfile(customerId, profile) { const customer = [...customers.values()].find((item) => item.id === customerId); if (!customer) return null; if (profile.displayName !== undefined) customer.displayName = profile.displayName; if (profile.mobilePhone !== undefined) customer.mobilePhone = profile.mobilePhone; if (profile.documentLast4 !== undefined) customer.documentLast4 = profile.documentLast4; return copy(customer); },
     async updateCustomerPassword(customerId, credentials) { const customer = [...customers.values()].find((item) => item.id === customerId); if (!customer) return false; customer.passwordSalt = credentials.passwordSalt; customer.passwordHash = credentials.passwordHash; return true; },
+    async markCustomerEmailVerified(customerId) { const customer = [...customers.values()].find((item) => item.id === customerId); if (!customer) return null; customer.emailVerifiedAt ??= now(); return copy(customer); },
+    async createCustomerActionToken(value) { for (const [key, item] of customerActionTokens) if (item.customerId === value.customerId && item.kind === value.kind) customerActionTokens.delete(key); customerActionTokens.set(value.tokenHash, { ...value, createdAt: now() }); },
+    async consumeCustomerActionToken(value) { const item = customerActionTokens.get(value.tokenHash); if (!item || item.kind !== value.kind || item.expiresAt <= Date.now()) return null; customerActionTokens.delete(value.tokenHash); return copy(item); },
     async createCustomerSession(session) { customerSessions.set(session.tokenHash, { ...session, id: randomUUID() }); },
     async getCustomerSession(tokenHash) { const item = customerSessions.get(tokenHash); if (!item || item.expiresAt < Date.now()) return null; const customer = [...customers.values()].find((row) => row.id === item.customerId); return customer ? copy({ ...item, customer }) : null; },
     async revokeCustomerSession(tokenHash) { customerSessions.delete(tokenHash); },

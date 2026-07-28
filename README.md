@@ -43,6 +43,12 @@ parcelas forem quitadas.
 | `GET` | `/health` | Saúde da aplicação e banco |
 | `POST` | `/v1/customer/register` | Criar conta do cliente |
 | `POST` | `/v1/customer/login` | Entrar no painel |
+| `PATCH` | `/v1/customer/profile` | Atualizar os dados da conta |
+| `POST` | `/v1/customer/password` | Trocar a senha autenticada |
+| `POST` | `/v1/customer/password/forgot` | Solicitar recuperação por e-mail |
+| `POST` | `/v1/customer/password/reset` | Redefinir senha com token de uso único |
+| `POST` | `/v1/customer/email-verification/request` | Reenviar confirmação de e-mail |
+| `POST` | `/v1/customer/email-verification/confirm` | Confirmar e-mail com token de uso único |
 | `GET` | `/v1/customer/orders` | Histórico e planos de parcelas |
 | `POST` | `/v1/customer/orders/:id/installments/refresh` | Atualização manual do plano no Asaas |
 | `POST` | `/v1/checkout/orders` | Criar pedido idempotente |
@@ -70,6 +76,12 @@ Variáveis obrigatórias em produção:
 - `ASAAS_ENVIRONMENT=production`
 - `ASAAS_API_KEY`
 - `ASAAS_WEBHOOK_TOKEN`
+- `SMTP_USER=comercial@cyara.com.br`
+- `SMTP_PASSWORD`
+
+O envio transacional usa `smtp.hostinger.com:465` com TLS por padrão. É possível
+sobrescrever `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE` e `EMAIL_FROM` sem criar
+outra conta de e-mail.
 
 O webhook no Asaas deve apontar para:
 

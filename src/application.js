@@ -3,6 +3,7 @@ import express from "express";
 import helmet from "helmet";
 import { getEnvironment } from "./config/environment.js";
 import { createAsaasClient } from "./integrations/asaas/client.js";
+import { createCustomerMailer } from "./integrations/email/mailer.js";
 import { createAsaasWebhookHandler } from "./routes/asaas-integration.js";
 import { createCheckoutRouter } from "./routes/checkout.js";
 import { createHealthRouter } from "./routes/health.js";
@@ -26,6 +27,7 @@ export function createApp(overrides = {}, dependencies = {}) {
     throw new Error("ASAAS_WEBHOOK_TOKEN is required when checkout is enabled in production.");
   }
   const asaasClient = dependencies.asaasClient ?? createAsaasClient(environment);
+  const customerMailer = dependencies.customerMailer ?? createCustomerMailer(environment);
   const store = dependencies.store ?? (environment.mysqlUrl ? createMySqlStore(environment.mysqlUrl) : createInMemoryStore());
   const installmentService = dependencies.installmentService
     ?? createInstallmentService({ asaasClient, store });
@@ -90,6 +92,7 @@ export function createApp(overrides = {}, dependencies = {}) {
     store,
   }));
   app.use("/v1/customer", createCustomerRouter(express, {
+    customerMailer,
     environment,
     installmentService,
     store,
@@ -105,5 +108,5 @@ export function createApp(overrides = {}, dependencies = {}) {
   });
   app.use(jsonErrorHandler);
 
-  return { app, environment, asaasClient, installmentService, store, readiness, ready, waitForReady };
+  return { app, environment, asaasClient, customerMailer, installmentService, store, readiness, ready, waitForReady };
 }

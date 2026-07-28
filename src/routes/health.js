@@ -18,6 +18,7 @@ export function createHealthRouter(
       },
       capabilities: {
         checkout: available && environment.checkoutEnabled,
+        transactionalEmail: available && environment.emailAvailable,
       },
     });
   });

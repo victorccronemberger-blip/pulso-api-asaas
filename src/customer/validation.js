@@ -50,6 +50,23 @@ export function validateCustomerPasswordChange(body) {
   return { currentPassword, newPassword };
 }
 
+export function validateCustomerEmail(body) {
+  const normalizedEmail = email(body?.email);
+  return normalizedEmail ? { email: normalizedEmail } : null;
+}
+
+export function validateCustomerPasswordReset(body) {
+  const token = typeof body?.token === "string" ? body.token.trim() : "";
+  const newPassword = password(body?.newPassword);
+  if (token.length < 32 || token.length > 256 || !newPassword) return null;
+  return { token, newPassword };
+}
+
+export function validateCustomerActionToken(body) {
+  const token = typeof body?.token === "string" ? body.token.trim() : "";
+  return token.length >= 32 && token.length <= 256 ? token : null;
+}
+
 export function publicCustomer(customer) {
   return {
     id: customer.id,
@@ -57,6 +74,7 @@ export function publicCustomer(customer) {
     displayName: customer.displayName,
     mobilePhone: customer.mobilePhone ?? null,
     documentLast4: customer.documentLast4 ?? null,
+    emailVerified: Boolean(customer.emailVerifiedAt),
     createdAt: customer.createdAt ?? null,
   };
 }
