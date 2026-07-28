@@ -162,6 +162,35 @@ function paymentPayload({ customerId, quote, payment, key }) {
   return { ...payload, value: amount(quote.totalCents) };
 }
 
+function paymentCallbackPayload(providerPayment, successUrl) {
+  const billingType = String(providerPayment?.billingType ?? "").trim().toUpperCase();
+  const value = Number(providerPayment?.value);
+  const paymentDueDate = String(providerPayment?.dueDate ?? "").trim();
+  if (
+    !["UNDEFINED", "BOLETO", "CREDIT_CARD", "PIX"].includes(billingType)
+    || !Number.isFinite(value)
+    || value <= 0
+    || !/^\d{4}-\d{2}-\d{2}$/.test(paymentDueDate)
+  ) {
+    throw new Error("Asaas returned incomplete payment data for callback configuration.");
+  }
+
+  const payload = {
+    billingType,
+    value,
+    dueDate: paymentDueDate,
+    callback: {
+      successUrl,
+      autoRedirect: true,
+    },
+  };
+  const description = String(providerPayment?.description ?? "").trim();
+  const externalReference = String(providerPayment?.externalReference ?? "").trim();
+  if (description) payload.description = description;
+  if (externalReference) payload.externalReference = externalReference;
+  return payload;
+}
+
 export function createCheckoutRouter(express, { environment, asaasClient, store }) {
   const router = express.Router();
   const limiter = createFixedWindowLimiter();
@@ -270,9 +299,10 @@ export function createCheckoutRouter(express, { environment, asaasClient, store 
       const successUrl = `${environment.publicOrigin}/checkout/sucesso/?order_id=${encodeURIComponent(orderId)}`;
       let updatedPayment = providerPayment;
       try {
-        updatedPayment = await asaasClient.updatePayment(orderId, {
-          callback: { successUrl },
-        });
+        updatedPayment = await asaasClient.updatePayment(
+          orderId,
+          paymentCallbackPayload(providerPayment, successUrl),
+        );
       } catch (callbackError) {
         console.error("Could not configure the Asaas return URL", {
           orderId,

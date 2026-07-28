@@ -97,7 +97,16 @@ test("creates a Pix charge from server-authoritative prices", async (context) =>
     },
     createPayment: async (payload) => {
       calls.push(["payment", payload]);
-      return { id: "pay_pulso6001", status: "PENDING", invoiceUrl: "https://sandbox.asaas.com/i/6001" };
+      return {
+        id: "pay_pulso6001",
+        status: "PENDING",
+        billingType: "PIX",
+        value: 1252.55,
+        dueDate: "2026-07-29",
+        description: "Novo CPA + Simulados Ancord 2026",
+        externalReference: payload.externalReference,
+        invoiceUrl: "https://sandbox.asaas.com/i/6001",
+      };
     },
     updatePayment: async (id, payload) => {
       calls.push(["update", id, payload]);
@@ -132,7 +141,18 @@ test("creates a Pix charge from server-authoritative prices", async (context) =>
   assert.equal(payment.billingType, "PIX");
   assert.equal(payment.value, 1252.55);
   assert.match(payment.externalReference, /^pulso:/);
-  assert.equal(calls.find(([name]) => name === "update")[2].callback.successUrl, "https://pulso.cyara.com.br/checkout/sucesso/?order_id=pay_pulso6001");
+  const callbackUpdate = calls.find(([name]) => name === "update")[2];
+  assert.deepEqual(callbackUpdate, {
+    billingType: "PIX",
+    value: 1252.55,
+    dueDate: "2026-07-29",
+    callback: {
+      successUrl: "https://pulso.cyara.com.br/checkout/sucesso/?order_id=pay_pulso6001",
+      autoRedirect: true,
+    },
+    description: "Novo CPA + Simulados Ancord 2026",
+    externalReference: payment.externalReference,
+  });
 });
 
 test("creates a ten-installment hosted Asaas invoice without receiving card data", async (context) => {
@@ -142,9 +162,21 @@ test("creates a ten-installment hosted Asaas invoice without receiving card data
     createCustomer: async () => assert.fail("Existing customer must be reused"),
     createPayment: async (payload) => {
       calls.push(payload);
-      return { id: "pay_pulso6002", status: "PENDING", invoiceUrl: "https://sandbox.asaas.com/i/6002" };
+      return {
+        id: "pay_pulso6002",
+        status: "PENDING",
+        billingType: "CREDIT_CARD",
+        value: 97.3,
+        dueDate: "2026-07-29",
+        description: "Novo CPA",
+        externalReference: payload.externalReference,
+        invoiceUrl: "https://sandbox.asaas.com/i/6002",
+      };
     },
-    updatePayment: async (id) => ({ id, status: "PENDING", invoiceUrl: "https://sandbox.asaas.com/i/6002" }),
+    updatePayment: async (id, payload) => {
+      calls.push(payload);
+      return { id, status: "PENDING", invoiceUrl: "https://sandbox.asaas.com/i/6002" };
+    },
   };
   const origin = await serve(context, enabledEnvironment, { asaasClient });
   const response = await fetch(`${origin}/v1/checkout/orders`, {
@@ -172,6 +204,17 @@ test("creates a ten-installment hosted Asaas invoice without receiving card data
   assert.equal("value" in calls[0], false);
   assert.equal(JSON.stringify(calls[0]).includes("creditCard"), false);
   assert.equal(JSON.stringify(calls[0]).includes("cvv"), false);
+  assert.deepEqual(calls[1], {
+    billingType: "CREDIT_CARD",
+    value: 97.3,
+    dueDate: "2026-07-29",
+    callback: {
+      successUrl: "https://pulso.cyara.com.br/checkout/sucesso/?order_id=pay_pulso6002",
+      autoRedirect: true,
+    },
+    description: "Novo CPA",
+    externalReference: calls[0].externalReference,
+  });
 });
 
 test("returns ten server-authoritative interest-free installment options", async (context) => {
