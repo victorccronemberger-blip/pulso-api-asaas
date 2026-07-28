@@ -16,6 +16,12 @@ function password(value) {
     : null;
 }
 
+function mobilePhone(value) {
+  const digits = String(value ?? "").replace(/\D/g, "");
+  if (!digits) return null;
+  return digits.length >= 10 && digits.length <= 13 ? digits : undefined;
+}
+
 export function validateCustomerCredentials(body) {
   const normalizedEmail = email(body?.email);
   const normalizedPassword = password(body?.password);
@@ -28,6 +34,20 @@ export function validateCustomerRegistration(body) {
   const normalizedName = displayName(body?.displayName);
   if (!credentials || !normalizedName) return null;
   return { ...credentials, displayName: normalizedName };
+}
+
+export function validateCustomerProfile(body) {
+  const normalizedName = displayName(body?.displayName);
+  const normalizedPhone = mobilePhone(body?.mobilePhone);
+  if (!normalizedName || normalizedPhone === undefined) return null;
+  return { displayName: normalizedName, mobilePhone: normalizedPhone };
+}
+
+export function validateCustomerPasswordChange(body) {
+  const currentPassword = password(body?.currentPassword);
+  const newPassword = password(body?.newPassword);
+  if (!currentPassword || !newPassword || currentPassword === newPassword) return null;
+  return { currentPassword, newPassword };
 }
 
 export function publicCustomer(customer) {

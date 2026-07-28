@@ -98,3 +98,71 @@ test("rejects duplicate customer registration and invalid login", async (context
   });
   assert.equal(invalid.status, 401);
 });
+
+test("updates the customer profile and changes the password with CSRF protection", async (context) => {
+  const { origin } = await serve(context);
+  const registration = await fetch(`${origin}/v1/customer/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      displayName: "Cliente Inicial",
+      email: "perfil@example.com",
+      password: "senha-inicial-segura-2026",
+    }),
+  });
+  const registered = await registration.json();
+  const cookie = cookies(registration);
+
+  const denied = await fetch(`${origin}/v1/customer/profile`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ displayName: "Cliente Atualizado", mobilePhone: "11999999999" }),
+  });
+  assert.equal(denied.status, 403);
+
+  const updated = await fetch(`${origin}/v1/customer/profile`, {
+    method: "PATCH",
+    headers: {
+      "content-type": "application/json",
+      cookie,
+      "x-csrf-token": registered.csrfToken,
+    },
+    body: JSON.stringify({ displayName: "Cliente Atualizado", mobilePhone: "(11) 99999-9999" }),
+  });
+  assert.equal(updated.status, 200);
+  assert.deepEqual((await updated.json()).customer, {
+    ...registered.customer,
+    displayName: "Cliente Atualizado",
+    mobilePhone: "11999999999",
+  });
+
+  const changed = await fetch(`${origin}/v1/customer/password`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      cookie,
+      "x-csrf-token": registered.csrfToken,
+    },
+    body: JSON.stringify({
+      currentPassword: "senha-inicial-segura-2026",
+      newPassword: "senha-nova-bem-segura-2026",
+    }),
+  });
+  assert.equal(changed.status, 200);
+  assert.deepEqual(await changed.json(), { changed: true, reauthenticate: true });
+
+  const expiredSession = await fetch(`${origin}/v1/customer/session`, { headers: { cookie } });
+  assert.equal(expiredSession.status, 401);
+  const oldLogin = await fetch(`${origin}/v1/customer/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: "perfil@example.com", password: "senha-inicial-segura-2026" }),
+  });
+  assert.equal(oldLogin.status, 401);
+  const newLogin = await fetch(`${origin}/v1/customer/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: "perfil@example.com", password: "senha-nova-bem-segura-2026" }),
+  });
+  assert.equal(newLogin.status, 200);
+});

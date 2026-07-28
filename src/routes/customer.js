@@ -15,6 +15,8 @@ import {
 import {
   publicCustomer,
   validateCustomerCredentials,
+  validateCustomerPasswordChange,
+  validateCustomerProfile,
   validateCustomerRegistration,
 } from "../customer/validation.js";
 import { parseCookies } from "../admin/security.js";
@@ -161,6 +163,45 @@ export function createCustomerRouter(express, {
     if (token) await store.revokeCustomerSession(tokenHash(token, pepper));
     clearCustomerCookies(response);
     response.status(204).end();
+  });
+
+  router.patch("/profile", limiter, async (request, response) => {
+    const session = await requireSession(request, response);
+    if (!session) return;
+    if (!requireCsrf(request, response, session)) return;
+    const profile = validateCustomerProfile(request.body);
+    if (!profile) {
+      response.status(400).json({
+        error: "invalid_customer_profile",
+        message: "Informe um nome válido e um telefone com DDD.",
+      });
+      return;
+    }
+    const customer = await store.updateCustomerProfile(session.customer.id, profile);
+    response.json({ customer: publicCustomer(customer) });
+  });
+
+  router.post("/password", limiter, async (request, response) => {
+    const session = await requireSession(request, response);
+    if (!session) return;
+    if (!requireCsrf(request, response, session)) return;
+    const input = validateCustomerPasswordChange(request.body);
+    const customer = input ? await store.getCustomerByEmail(session.customer.email) : null;
+    if (!input || !customer || !(await verifyPassword(input.currentPassword, customer))) {
+      response.status(400).json({
+        error: "invalid_password_change",
+        message: "Confira a senha atual e use uma nova senha com pelo menos 12 caracteres.",
+      });
+      return;
+    }
+    const credentials = await hashPassword(input.newPassword);
+    await store.updateCustomerPassword(session.customer.id, {
+      passwordSalt: credentials.salt,
+      passwordHash: credentials.hash,
+    });
+    await store.revokeCustomerSessions(session.customer.id);
+    clearCustomerCookies(response);
+    response.json({ changed: true, reauthenticate: true });
   });
 
   router.get("/orders", async (request, response) => {
