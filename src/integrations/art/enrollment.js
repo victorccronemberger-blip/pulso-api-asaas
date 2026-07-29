@@ -73,6 +73,10 @@ export function createEnrollmentService(artClient, config = {}) {
   const provisionTimeoutMs = Number(config.provisionTimeoutMs ?? 120_000);
   const defaultPhone = config.defaultPhone ?? "11999999999";
   const defaultBirthDate = config.defaultBirthDate ?? "1990-01-01";
+  const serviceAccounts = Array.isArray(config.serviceAccounts)
+    ? config.serviceAccounts.filter((account) => account?.email && account?.password)
+    : [];
+  const store = config.store ?? null;
 
   async function discoverCarrierToken(xApiKey) {
     for (const userId of carrierUserIds) {
@@ -119,8 +123,94 @@ export function createEnrollmentService(artClient, config = {}) {
   // matricular na turma MAIS RECENTE com checkout ativo. A lista `valid` já
   // chega ordenada desc (data de início, depois id) — valid[0] é a mais nova.
   function pickVigente(valid) {
+    // Regra do contrato ART (Rafael, 2026-07-29): turma MAIS RECENTE com checkout
+    // ativo. `valid` já chega ordenada desc (data_inicio, depois id) — valid[0].
     const chosen = valid[0];
     return { ...chosen, selectionReason: valid.length >= 2 ? "turma-mais-recente" : "turma-unica", allValid: valid };
+  }
+
+  // Varredura de ids via carrier prepare (o alg=none ainda é aceito no prepare).
+  // Recebe faixas [inicio, fim] explícitas — quem decide as faixas é o
+  // discoverTurmasVivas (âncoras + fronteira persistida).
+  async function scanTurmasViaCarrier({ tag, xApiKey, carrierToken, ranges, onLog = () => {} }) {
+    const ids = new Set();
+    for (const range of ranges ?? []) {
+      const start = Math.max(1, Math.floor(Number(range?.[0])));
+      const end = Math.min(Math.floor(Number(range?.[1])), start + 400);
+      for (let idTurma = start; idTurma <= end; idTurma += 1) ids.add(idTurma);
+    }
+    const candidates = [...ids];
+    if (!candidates.length) return [];
+    onLog(`[turma] scan carrier: ${candidates.length} candidatos para tag=${tag}`);
+    const valid = [];
+    const concurrency = 12;
+    for (let start = 0; start < candidates.length; start += concurrency) {
+      const batch = candidates.slice(start, start + concurrency);
+      const results = await Promise.all(batch.map(async (idTurma) => {
+        try {
+          const { status, body } = await artClient.prepareCheckout({ tag, idTurma, xApiKey, token: carrierToken });
+          if (status === 200 && body?.course) {
+            return { idTurma, course: body.course, requiresFinancialInstitution: Boolean(body.financialInstitions), data_inicio: body.course.data_inicio ?? "" };
+          }
+        } catch { /* candidato fora do ar — segue o scan */ }
+        return null;
+      }));
+      for (const result of results) if (result) valid.push(result);
+    }
+    valid.sort(compareTurmaDesc);
+    if (valid.length) onLog(`[turma] scan carrier achou ${valid.length} turma(s) ativa(s): ${valid.map((v) => v.idTurma).join(", ")}`);
+    return valid;
+  }
+
+  // Descoberta de turmas vivas SEM o login do comprador — é o que mantém o
+  // projeto funcionando quando o cohort do catálogo morre ou a plataforma lança
+  // turma nova. Camadas, da mais dinâmica para a mais bruta:
+  //   1. SERVICE ACCOUNTS (ART_SERVICE_ACCOUNTS): login dedicado → RS256 →
+  //      listagem REAL de /v1/services/turmas → filtro por tag → validação via
+  //      prepare. Tempo real, sem nenhum id hardcoded.
+  //   2. SCAN ADAPTATIVO via carrier: âncoras (cohorts) ±150 + fronteira
+  //      PERSISTIDA por tag (app_settings). Quando acha turma na borda da
+  //      fronteira, estende e grava — a próxima execução já cobre o território
+  //      novo. Sobrevive a lançamento de turmas sem intervenção humana.
+  async function discoverTurmasVivas({ tag, xApiKey, carrierToken, anchors, onLog = () => {} }) {
+    for (const account of serviceAccounts) {
+      try {
+        const session = await artClient.login(account.email, account.password);
+        const ativas = await listActiveTurmasForTag({ tag, xApiKey, token: session.token, onLog });
+        if (!ativas.length) {
+          onLog(`[turma] service-account ${account.email}: nenhuma turma ativa listada para tag=${tag}`);
+          continue;
+        }
+        const valid = await validateCandidatesViaPrepare({ tag, candidates: ativas, xApiKey, carrierToken });
+        if (valid.length) {
+          onLog(`[turma] service-account ${account.email}: ${valid.length} turma(s) viva(s) em tempo real: ${valid.map((v) => v.idTurma).join(", ")}`);
+          return valid;
+        }
+        onLog(`[turma] service-account ${account.email}: turmas listadas mas nenhuma com checkout ativo`);
+      } catch (error) {
+        onLog(`[turma] service-account ${account.email} indisponivel (${String(error).slice(0, 100)})`);
+      }
+    }
+    const numericAnchors = (anchors ?? []).map(Number).filter((n) => Number.isSafeInteger(n) && n > 0);
+    let frontier = null;
+    if (store?.getSetting) {
+      try { frontier = Number(await store.getSetting(`art-scan-frontier:${tag}`)) || null; } catch { frontier = null; }
+    }
+    const ranges = numericAnchors.map((anchor) => [anchor - 150, anchor + 150]);
+    const frontierStart = frontier ?? (numericAnchors.length ? Math.max(...numericAnchors) + 151 : 4130);
+    ranges.push([frontierStart, frontierStart + 250]);
+    const valid = await scanTurmasViaCarrier({ tag, xApiKey, carrierToken, ranges, onLog });
+    if (valid.length && store?.setSetting) {
+      const maxFound = Math.max(...valid.map((v) => v.idTurma));
+      const nextFrontier = Math.max(maxFound + 100, frontierStart + 250);
+      if (nextFrontier !== frontier) {
+        try {
+          await store.setSetting(`art-scan-frontier:${tag}`, nextFrontier);
+          onLog(`[turma] fronteira de scan persistida: ${nextFrontier}`);
+        } catch { /* melhor esforço */ }
+      }
+    }
+    return valid;
   }
 
   // Resolve a turma de PROVISIONAMENTO (roda antes do login, sem RS256). Usa os
@@ -262,7 +352,12 @@ export function createEnrollmentService(artClient, config = {}) {
     try {
       turmaProvisao = await resolveTurma({ tag, candidateTurmas: provisionCandidates, xApiKey, carrierToken, onLog });
     } catch (error) {
-      onLog(`[turma] catalogo sem turma ativa (${String(error).slice(0, 120)}) — tentando descoberta com login RS256`);
+      onLog(`[turma] catalogo sem turma ativa (${String(error).slice(0, 120)}) — descoberta dinamica (service-account/scan adaptativo)`);
+      const discovered = await discoverTurmasVivas({ tag, xApiKey, carrierToken, anchors: provisionCandidates, onLog });
+      if (discovered.length) {
+        turmaProvisao = pickVigente(discovered);
+        onLog(`[turma] descoberta dinamica resolveu provisao ${turmaProvisao.idTurma} (${turmaProvisao.selectionReason})`);
+      }
     }
 
     let session = null;

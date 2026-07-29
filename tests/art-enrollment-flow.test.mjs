@@ -255,14 +255,13 @@ test("enrollStudent: provisiona conta nova com os dados reais do comprador", asy
   assert.equal(phase1Payload.post_code, "01310930");
 });
 
-test("enrollStudent: cohort do catalogo morto cai na descoberta RS256 da conta", async () => {
-  // Produção 2026-07-29: tag cfp_modular_12345678 com cohort 3629 sem checkout
-  // ativo (prepare 404). O fluxo NÃO pode morrer — loga na conta do comprador,
-  // lista as turmas vivas e escolhe uma delas.
+test("enrollStudent: cohort morto + scan vazio → descoberta RS256 da conta resolve", async () => {
+  // Última camada dinâmica: catálogo morto, scan adaptativo não alcança a turma
+  // (id fora das faixas), mas a conta do comprador existe → listagem RS256 real.
   const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
   const dynamicTurmas = [
-    { id_turma: 4097, tag_curso: "cfp_modular_12345678", nome: "Modular T9", ativa: 1, data_inicio_aulas: "2026-08-01" },
-    { id_turma: 4100, tag_curso: "outra_tag", nome: "outra", ativa: 1, data_inicio_aulas: "2026-08-01" },
+    { id_turma: 5000, tag_curso: "cfp-2026_54", nome: "Turma nova distante", ativa: 1, data_inicio_aulas: "2026-09-01" },
+    { id_turma: 5001, tag_curso: "outra_tag", nome: "outra", ativa: 1, data_inicio_aulas: "2026-09-01" },
   ];
   async function handler(url, options = {}) {
     const u = new URL(url);
@@ -272,14 +271,14 @@ test("enrollStudent: cohort do catalogo morto cai na descoberta RS256 da conta",
       const tag = u.searchParams.get("tag");
       const idTurma = u.searchParams.get("id_turma");
       if (tag === "cpa2026" && idTurma === "4058") return json({ course: { tag_curso: tag, nome: "CPA", valor_curso: 1500 } });
-      if (tag === "cfp_modular_12345678" && idTurma === "4097") return json({ course: { tag_curso: tag, nome: "Modular", valor_curso: 4998 } });
+      if (tag === "cfp-2026_54" && idTurma === "5000") return json({ course: { tag_curso: tag, nome: "CFP", valor_curso: 4998 } });
       return json({ error: "Course not found" }, 404);
     }
     if (path === "/v1/services/turmas") return json({ current_page: 1, last_page: 1, data: dynamicTurmas });
     if (path === "/v1/checkout/findStudent") return json({ error: "not found" }, 404);
     if (path === "/v1/services/student/metrics") return json({}, 405);
     if (path === "/v1/checkout/process/start") return json({ ok: true }, 200);
-    if (path === "/v1/services/aluno/findCoursesByStudent") return json([{ tag: "cfp_modular_12345678", status: "APPROVED", id_turma: 4097 }]);
+    if (path === "/v1/services/aluno/findCoursesByStudent") return json([{ tag: "cfp-2026_54", status: "APPROVED", id_turma: 5000 }]);
     return json({ error: "not found" }, 404);
   }
   const client = createArtClient({ pollIntervalMs: 1, pollTimeoutMs: 2000 }, handler);
@@ -287,17 +286,68 @@ test("enrollStudent: cohort do catalogo morto cai na descoberta RS256 da conta",
 
   const logs = [];
   const result = await service.enrollStudent({
-    email: "modular@example.com",
+    email: "distante@example.com",
     cpf: "19100000000",
-    tag: "cfp_modular_12345678",
-    fullName: "Cliente Modular",
+    tag: "cfp-2026_54",
+    fullName: "Cliente Distante",
     onLog: (line) => logs.push(line),
   });
 
   assert.equal(result.status, "CONFIRMED");
-  assert.equal(result.idTurma, 4097, "matriculou na turma descoberta via RS256, não no cohort morto do catálogo");
+  assert.equal(result.idTurma, 5000, "descoberta RS256 achou a turma fora das faixas de scan");
   assert.ok(logs.some((l) => l.includes("catalogo sem turma ativa")), logs.join("\n"));
-  assert.ok(logs.some((l) => l.includes("descoberta-RS256 resolveu provisao 4097")), logs.join("\n"));
+  assert.ok(logs.some((l) => l.includes("descoberta-RS256 resolveu provisao 5000")), logs.join("\n"));
+});
+
+test("enrollStudent: service-account lista turmas em tempo real (camada primaria dinamica)", async () => {
+  // Com ART_SERVICE_ACCOUNTS configurado, a descoberta usa login dedicado +
+  // listagem real de /v1/services/turmas — nenhum id hardcoded no caminho.
+  const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
+  const dynamicTurmas = [
+    { id_turma: 4160, tag_curso: "cfp-2026_54", nome: "Turma atual", ativa: 1, data_inicio_aulas: "2026-08-10" },
+    { id_turma: 4158, tag_curso: "cfp-2026_54", nome: "Turma anterior", ativa: 1, data_inicio_aulas: "2026-07-01" },
+    { id_turma: 4161, tag_curso: "outra_tag", nome: "outra", ativa: 1, data_inicio_aulas: "2026-08-12" },
+  ];
+  async function handler(url, options = {}) {
+    const u = new URL(url);
+    const path = u.pathname;
+    if (path === "/api/login") {
+      const body = JSON.parse(String(options.body ?? "{}"));
+      const token = body.email === "svc@pulso.test" ? "rs256-svc" : "rs256-comprador";
+      return json({ response: { status: "SUCCESS", data: { token, id: 999 } } });
+    }
+    if (path === "/v1/checkout/prepare") {
+      const tag = u.searchParams.get("tag");
+      const idTurma = u.searchParams.get("id_turma");
+      if (tag === "cpa2026" && idTurma === "4058") return json({ course: { tag_curso: tag, nome: "CPA", valor_curso: 1500 } });
+      if (tag === "cfp-2026_54" && (idTurma === "4160" || idTurma === "4158")) return json({ course: { tag_curso: tag, nome: "CFP", valor_curso: 4998, data_inicio: idTurma === "4160" ? "2026-08-10" : "2026-07-01" } });
+      return json({ error: "Course not found" }, 404);
+    }
+    if (path === "/v1/services/turmas") return json({ current_page: 1, last_page: 1, data: dynamicTurmas });
+    if (path === "/v1/checkout/findStudent") return json({ error: "not found" }, 404);
+    if (path === "/v1/services/student/metrics") return json({}, 405);
+    if (path === "/v1/checkout/process/start") return json({ ok: true }, 200);
+    if (path === "/v1/services/aluno/findCoursesByStudent") return json([{ tag: "cfp-2026_54", status: "APPROVED", id_turma: 4160 }]);
+    return json({ error: "not found" }, 404);
+  }
+  const client = createArtClient({ pollIntervalMs: 1, pollTimeoutMs: 2000 }, handler);
+  const service = createEnrollmentService(client, {
+    provisionTimeoutMs: 2000,
+    serviceAccounts: [{ email: "svc@pulso.test", password: "19100000000" }],
+  });
+
+  const logs = [];
+  const result = await service.enrollStudent({
+    email: "comprador@example.com",
+    cpf: "19100000000",
+    tag: "cfp-2026_54",
+    fullName: "Comprador Service",
+    onLog: (line) => logs.push(line),
+  });
+
+  assert.equal(result.status, "CONFIRMED");
+  assert.equal(result.idTurma, 4160, "regra vigente: a turma MAIS RECENTE da listagem real");
+  assert.ok(logs.some((l) => l.includes("service-account svc@pulso.test: 2 turma(s) viva(s) em tempo real")), logs.join("\n"));
 });
 
 test("enrollStudent: order PENDING zumbi é deletada e o re-enroll nasce APPROVED (recovery)", async () => {
@@ -359,6 +409,70 @@ test("enrollStudent: order PENDING zumbi é deletada e o re-enroll nasce APPROVE
   assert.deepEqual(deleted, ["9990001"], "somente a order certa foi deletada — as outras ficaram intactas");
   assert.equal(enrollCalls, 2, "um re-enroll limpo após o delete");
   assert.ok(logs.some((l) => l.includes("DELETE order 9990001")), logs.join("\n"));
+});
+
+test("enrollStudent: conta nova + cohort morto — scan carrier acha a turma viva e provisiona", async () => {
+  // Caso cfp_modular_12345678 (produção 2026-07-29): cohort do catálogo morto
+  // (3629 → 404) e comprador sem conta na plataforma (login falha → sem RS256
+  // para listar turmas). O scan via carrier prepare varre a faixa do cohort e
+  // encontra a turma viva (3776), permitindo provisionar a conta.
+  const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
+  let logins = 0;
+  let enrollCalls = 0;
+  const dynamicTurmas = [
+    { id_turma: 3776, tag_curso: "cfp_modular_12345678", nome: "Modular T1", ativa: 1, data_inicio_aulas: "2026-05-17" },
+  ];
+  async function handler(url, options = {}) {
+    const u = new URL(url);
+    const path = u.pathname;
+    if (path === "/api/login") {
+      logins += 1;
+      if (logins < 2) return json({ response: { status: "ERROR", message: "credenciais invalidas" } });
+      return json({ response: { status: "SUCCESS", data: { token: "rs256-real-do-aluno", id: 205000 } } });
+    }
+    if (path === "/v1/checkout/prepare") {
+      const tag = u.searchParams.get("tag");
+      const idTurma = u.searchParams.get("id_turma");
+      if (tag === "cpa2026" && idTurma === "4058") return json({ course: { tag_curso: tag, nome: "CPA", valor_curso: 1500 } });
+      if (tag === "cfp_modular_12345678" && idTurma === "3776") return json({ course: { tag_curso: tag, nome: "Modular", valor_curso: 9997, data_inicio: "2026-05-17" } });
+      return json({ error: "Course not found" }, 404);
+    }
+    if (path === "/v1/services/turmas") return json({ current_page: 1, last_page: 1, data: dynamicTurmas });
+    if (path === "/v1/checkout/findStudent") return json({ error: "not found" }, 404);
+    if (path === "/v1/services/student/metrics") return json({}, 405);
+    if (path === "/v1/checkout/process/start") {
+      enrollCalls += 1;
+      return enrollCalls === 1 ? json({ error: "Ops!" }, 500) : json({ ok: true }, 200);
+    }
+    if (path === "/v1/services/aluno/findCoursesByStudent") {
+      const auth = options.headers?.Authorization ?? options.headers?.authorization ?? "";
+      if (auth !== "Bearer rs256-real-do-aluno") return json({ message: "Unauthenticated." }, 401);
+      return json(enrollCalls >= 2 ? [{ tag: "cfp_modular_12345678", status: "APPROVED", id_turma: 3776 }] : []);
+    }
+    return json({ error: "not found" }, 404);
+  }
+  const client = createArtClient({ pollIntervalMs: 1, pollTimeoutMs: 8000 }, handler);
+  const settingsWrites = [];
+  const fakeStore = {
+    getSetting: async () => null,
+    setSetting: async (key, value) => { settingsWrites.push([key, value]); },
+  };
+  const service = createEnrollmentService(client, { provisionTimeoutMs: 20_000, store: fakeStore });
+
+  const logs = [];
+  const result = await service.enrollStudent({
+    email: "modular.nova@example.com",
+    cpf: "19100000000",
+    tag: "cfp_modular_12345678",
+    fullName: "Cliente Modular Nova",
+    candidateTurmas: ["3629"],
+    onLog: (line) => logs.push(line),
+  });
+
+  assert.equal(result.status, "CONFIRMED");
+  assert.equal(result.idTurma, 3776, "turma viva descoberta pelo scan carrier");
+  assert.ok(logs.some((l) => l.includes("scan carrier achou 1 turma(s) ativa(s): 3776")), logs.join("\n"));
+  assert.deepEqual(settingsWrites[0], ["art-scan-frontier:cfp_modular_12345678", 4030], "fronteira persistida para a proxima execucao");
 });
 
 test("polling: 500 'id_usuario' re-dispara o sync do perfil e confirma (finding #3)", async () => {

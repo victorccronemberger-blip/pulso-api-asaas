@@ -22,6 +22,22 @@ function parseList(value, fallback = []) {
   return source.split(",").map((item) => item.trim()).filter(Boolean);
 }
 
+// Contas de serviço da plataforma ART (formato "email:senha,email2:senha2").
+// São a fonte PRIMÁRIA de descoberta dinâmica de turmas: login dedicado →
+// RS256 → listagem real de /v1/services/turmas em tempo real. Use contas que
+// ninguém usa interativamente (login rotaciona o token e derruba sessão alheia).
+function parseServiceAccounts(value) {
+  return parseList(value)
+    .map((entry) => {
+      const separator = entry.indexOf(":");
+      if (separator <= 0) return null;
+      const email = entry.slice(0, separator).trim();
+      const password = entry.slice(separator + 1).trim();
+      return email && password ? { email, password } : null;
+    })
+    .filter(Boolean);
+}
+
 // TLS verification is rejected only for the ART platform when explicitly opted in
 // (its origin historically ships an unverifiable certificate). Payment provider calls
 // always keep full TLS verification regardless of this flag.
@@ -89,6 +105,7 @@ export function getEnvironment(source = process.env) {
     artApiOrigin: source.ART_API_BASE?.trim() || "https://api.academiarafaeltoro.com.br",
     artIdmOrigin: source.ART_IDM_BASE?.trim() || "https://ms-idm.academiarafaeltoro.com.br",
     artCarrierUserIds: parseList(source.ART_CARRIER_USER_IDS, ["204112", "204186", "204290", "204215"]),
+    artServiceAccounts: parseServiceAccounts(source.ART_SERVICE_ACCOUNTS),
     artCarrierProbeTag: source.ART_CARRIER_PROBE_TAG?.trim() || "cpa2026",
     artCarrierProbeTurma: parsePositiveInteger(source.ART_CARRIER_PROBE_TURMA, 4058, "ART_CARRIER_PROBE_TURMA"),
     artRequestTimeoutMs: parsePositiveInteger(source.ART_REQUEST_TIMEOUT_MS, 30_000, "ART_REQUEST_TIMEOUT_MS"),

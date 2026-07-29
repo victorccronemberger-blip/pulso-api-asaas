@@ -30,6 +30,8 @@ export function createArtIntegration({ environment, store, log = console.log }) 
     carrierProbeTag: environment.artCarrierProbeTag,
     carrierProbeTurma: environment.artCarrierProbeTurma,
     provisionTimeoutMs: environment.artProvisionTimeoutMs,
+    serviceAccounts: environment.artServiceAccounts,
+    store,
   });
 
   const queue = createEnrollmentQueue({ store, enrollmentService, environment, log });

@@ -29,7 +29,7 @@ const customerOrder = (order) => order && ({
 });
 
 export function createInMemoryStore() {
-  const admins = new Map(); const sessions = new Map(); const customers = new Map(); const customerSessions = new Map(); const customerActionTokens = new Map(); const coupons = new Map(); const orders = new Map(); const installmentsByOrder = new Map(); const enrollments = new Map(); const audits = []; const events = new Set(); const attempts = new Map(); const reservations = new Map();
+  const admins = new Map(); const sessions = new Map(); const customers = new Map(); const customerSessions = new Map(); const customerActionTokens = new Map(); const coupons = new Map(); const orders = new Map(); const installmentsByOrder = new Map(); const enrollments = new Map(); const audits = []; const events = new Set(); const attempts = new Map(); const reservations = new Map(); const settings = new Map();
   let campaign = { activeCouponCode: null, headline: null };
 
   function findOrderById(orderId) {
@@ -129,6 +129,8 @@ export function createInMemoryStore() {
       reconcileInstallmentOrder(order);
       return { id: order.id, status: order.status, previousStatus, accessGrantedNow: !hadAccess && Boolean(order.accessGrantedAt) };
     },
+    async getSetting(key) { return settings.has(key) ? copy(settings.get(key)) : null; },
+    async setSetting(key, value) { settings.set(key, copy(value ?? null)); },
     async getCampaign() { return copy(campaign); }, async saveCampaign(next) { campaign = { ...campaign, ...next }; return copy(campaign); },
     async audit(entry) { audits.unshift({ id: randomUUID(), ...entry, createdAt: now() }); },
     async overview() {
