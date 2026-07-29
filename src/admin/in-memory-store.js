@@ -28,8 +28,8 @@ const customerOrder = (order) => order && ({
   })),
 });
 
-export function createInMemoryStore() {
-  const admins = new Map(); const sessions = new Map(); const customers = new Map(); const customerSessions = new Map(); const customerActionTokens = new Map(); const coupons = new Map(); const orders = new Map(); const installmentsByOrder = new Map(); const enrollments = new Map(); const audits = []; const events = new Set(); const attempts = new Map(); const reservations = new Map(); const settings = new Map();
+export function createInMemoryStore({ catalogProducts = [] } = {}) {
+  const admins = new Map(); const sessions = new Map(); const customers = new Map(); const customerSessions = new Map(); const customerActionTokens = new Map(); const coupons = new Map(); const orders = new Map(); const installmentsByOrder = new Map(); const enrollments = new Map(); const audits = []; const events = new Set(); const attempts = new Map(); const reservations = new Map(); const settings = new Map(); const products = new Map(catalogProducts.map((product) => [product.slug, structuredClone(product)]));
   let campaign = { activeCouponCode: null, headline: null };
 
   function findOrderById(orderId) {
@@ -61,6 +61,7 @@ export function createInMemoryStore() {
   }
   return {
     async ensureSchema() {}, async close() {},
+    async listCatalogProducts({ activeOnly = true } = {}) { return copy([...products.values()].filter((product) => !activeOnly || product.active !== false).sort((a, b) => Number(a.sortOrder ?? 0) - Number(b.sortOrder ?? 0) || String(a.title).localeCompare(String(b.title)))); },
     async countAdmins() { return admins.size; }, async getAdminByEmail(email) { return copy(admins.get(email) ?? null); },
     async createAdmin(admin) { const value = { id: randomUUID(), ...admin, createdAt: now() }; admins.set(value.email, value); return copy(value); },
     async createSession(session) { sessions.set(session.tokenHash, { ...session, id: randomUUID() }); },

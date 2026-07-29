@@ -13,6 +13,7 @@ import { createCustomerRouter } from "./routes/customer.js";
 import { createInMemoryStore } from "./admin/in-memory-store.js";
 import { createMySqlStore } from "./admin/mysql-store.js";
 import { createInstallmentService } from "./services/installment-service.js";
+import { replaceCatalogProducts } from "./domain/catalog.js";
 import { requestContext } from "./http/request-context.js";
 import { jsonErrorHandler } from "./http/error-handler.js";
 
@@ -51,6 +52,12 @@ export function createApp(overrides = {}, dependencies = {}) {
   };
   const ready = Promise.resolve()
     .then(() => store.ensureSchema())
+    .then(() => store.listCatalogProducts())
+    .then((products) => {
+      if (products.length) replaceCatalogProducts(products);
+      else if (environment.nodeEnvironment === "production") throw new Error("O catálogo de produtos do banco está vazio.");
+      return store;
+    })
     .then(() => {
       readiness.status = "ready";
       return store;
