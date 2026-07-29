@@ -170,6 +170,62 @@ test("enrollStudent: polling sobrevive a 401 renovando a sessao (rotacao de toke
   assert.ok(logs.some((l) => l.includes("sessao renovada apos 401")), logs.join("\n"));
 });
 
+test("enrollStudent: alinha o documento ao perfil ja registrado na plataforma (mismatch de CPF)", async () => {
+  // Caso Karine (producao 2026-07-29): conta existente com documento A no perfil
+  // da plataforma, pedido PULSO com documento B. A fase 2 precisa mandar o
+  // documento DO PERFIL, senao a plataforma responde 500.
+  const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
+  let capturedPayload = null;
+  const dynamicTurmas = [
+    { id_turma: 4155, tag_curso: "cfp-2026_54", nome: "10 anos", ativa: 1, data_inicio_aulas: "2026-07-02" },
+  ];
+  async function handler(url, options = {}) {
+    const u = new URL(url);
+    const path = u.pathname;
+    if (path === "/api/login") return json({ response: { status: "SUCCESS", data: { token: "rs256-real-do-aluno", id: 11833 } } });
+    if (path === "/v1/checkout/prepare") return json({ course: { tag_curso: "cfp-2026_54", nome: "Curso", valor_curso: 9997 } });
+    if (path === "/v1/services/turmas") return json({ current_page: 1, last_page: 1, data: dynamicTurmas });
+    if (path === "/v1/checkout/findStudent") {
+      return json({
+        nome: "Karine", sobre_nome: "Santiago",
+        documento: "529.982.030-91", telefone: "(11) 98888-7777",
+        dt_nascimento: "1985-05-10", cidade: "Campinas", uf: "SP",
+        rua: "Rua Real", numero: "45", bairro: "Jardim", cep: "13000-000",
+      });
+    }
+    if (path === "/v1/services/student/metrics") return json({}, 405);
+    if (path === "/v1/checkout/process/start") {
+      capturedPayload = JSON.parse(String(options.body ?? "{}"));
+      return json({ ok: true }, 200);
+    }
+    if (path === "/v1/services/aluno/findCoursesByStudent") {
+      const auth = options.headers?.Authorization ?? options.headers?.authorization ?? "";
+      if (auth !== "Bearer rs256-real-do-aluno") return json({ message: "Unauthenticated." }, 401);
+      return json([{ tag: "cfp-2026_54", status: "APPROVED", id_turma: 4155 }]);
+    }
+    return json({ error: "not found" }, 404);
+  }
+  const client = createArtClient({ pollIntervalMs: 1, pollTimeoutMs: 2000 }, handler);
+  const service = createEnrollmentService(client, { provisionTimeoutMs: 2000 });
+
+  const logs = [];
+  const result = await service.enrollStudent({
+    email: "karine@example.com",
+    cpf: "19100000000",
+    tag: "cfp-2026_54",
+    fullName: "Karine Do Pedido",
+    onLog: (line) => logs.push(line),
+  });
+
+  assert.equal(result.status, "CONFIRMED");
+  assert.ok(capturedPayload, "fase 2 enviou payload");
+  assert.equal(capturedPayload.document_number, "52998203091", "documento veio do perfil da plataforma");
+  assert.equal(capturedPayload.full_name, "Karine Santiago");
+  assert.equal(capturedPayload.phone_number, "11988887777");
+  assert.equal(capturedPayload.city, "Campinas");
+  assert.ok(logs.some((l) => l.includes("DIFERENTE do pedido")), logs.join("\n"));
+});
+
 test("enrollStudent: sem conta de serviço, a listagem com carrier alg=none é rejeitada (401) mas o fluxo segue via cohort", async () => {
   // dynamicTurmas vazio simula listagem dinâmica indisponível; cohort 4155 ainda ativa.
   const mock = artPlatformMock({

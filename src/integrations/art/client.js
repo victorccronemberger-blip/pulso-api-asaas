@@ -85,6 +85,12 @@ export function createArtClient(config = {}, fetchImplementation = fetch) {
     return turmas;
   }
 
+  function findStudent({ email, xApiKey, token }) {
+    const url = new URL(`${apiOrigin}/v1/checkout/findStudent`);
+    url.searchParams.set("email", email);
+    return requestJson(url, { headers: headersFor(xApiKey, token) });
+  }
+
   function findCoursesByStudent({ email, xApiKey, token }) {
     const url = new URL(`${apiOrigin}/v1/services/aluno/findCoursesByStudent`);
     url.searchParams.set("email", email);
@@ -150,6 +156,7 @@ export function createArtClient(config = {}, fetchImplementation = fetch) {
     prepareCheckout,
     listTurmasPage,
     listAllTurmas,
+    findStudent,
     findCoursesByStudent,
     syncStudentProfile,
     startCheckoutProcess,

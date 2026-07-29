@@ -197,10 +197,54 @@ export function createEnrollmentService(artClient, config = {}) {
     const resolvedFinancialInstitution = financialInstitution || (turma.requiresFinancialInstitution ? "998" : "");
     onLog(`[enroll] inicio email=${email} tag=${tag} turma=${idTurma} (${turma.selectionReason}) fi=${resolvedFinancialInstitution || "-"}`);
 
+    // Identidade alinhada ao perfil JA REGISTRADO na plataforma: o documento do
+    // aluno manda no payload. Caso real (producao, 2026-07-29): conta criada com
+    // um CPF e pedido posterior com outro -> fase2 respondia 500 "Ops" ate o
+    // payload bater com o documento do perfil. O CPF do pedido so vale quando a
+    // conta acabou de ser provisionada por nos (fase 1, sem perfil anterior).
+    const digitsOnly = (value) => String(value ?? "").replace(/\D/g, "") || null;
+    let platformProfile = null;
+    try {
+      const found = await artClient.findStudent({ email, xApiKey, token: session.token });
+      if (found.status === 200 && found.body && typeof found.body === "object") platformProfile = found.body;
+    } catch { /* sonda tolerante: segue com os dados do pedido */ }
+    const platformDocument = digitsOnly(platformProfile?.documento);
+    const identity = {
+      cpf: platformDocument ?? cpf,
+      fullName: [platformProfile?.nome, platformProfile?.sobre_nome].filter(Boolean).join(" ").trim() || fullName,
+      phone: digitsOnly(platformProfile?.telefone) ?? defaultPhone,
+      birthDate: String(platformProfile?.dt_nascimento ?? "").slice(0, 10) || defaultBirthDate,
+      city: platformProfile?.cidade || "Sao Paulo",
+      state: platformProfile?.uf || "SP",
+      street: platformProfile?.rua || "Rua Test",
+      number: String(platformProfile?.numero ?? "").trim() || "123",
+      district: platformProfile?.bairro || "Centro",
+      postCode: digitsOnly(platformProfile?.cep) ?? "01000000",
+    };
+    if (platformDocument && platformDocument !== cpf) {
+      onLog(`[enroll] perfil da plataforma tem doc ...${platformDocument.slice(-4)} DIFERENTE do pedido ...${String(cpf).slice(-4)} — usando o da plataforma`);
+    }
+
     await artClient.syncStudentProfile({ xApiKey, token: session.token });
     await sleep(2000);
 
-    const payload = buildEnrollPayload({ tag, idTurma, email, fullName, cpf, financialInstitution: resolvedFinancialInstitution, affiliate, ...payloadDefaults });
+    const payload = buildEnrollPayload({
+      tag,
+      idTurma,
+      email,
+      fullName: identity.fullName,
+      cpf: identity.cpf,
+      phone: identity.phone,
+      birthDate: identity.birthDate,
+      financialInstitution: resolvedFinancialInstitution,
+      city: identity.city,
+      state: identity.state,
+      street: identity.street,
+      number: identity.number,
+      district: identity.district,
+      postCode: identity.postCode,
+      affiliate,
+    });
     const phase2 = await artClient.startCheckoutProcess({ payload, xApiKey, token: session.token });
     onLog(`[enroll] fase2 HTTP ${phase2.status}: ${String(phase2.text ?? "").slice(0, 180)}`);
 
