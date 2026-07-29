@@ -27,6 +27,22 @@ const sourceTagBySlug = Object.freeze(
   Object.fromEntries(products.map((product) => [product.slug, product.sourceTag])),
 );
 
+const cohortBySlug = Object.freeze(
+  Object.fromEntries(products.filter((p) => p.cohort).map((product) => [product.slug, product.cohort])),
+);
+
+const cohortBySourceTag = Object.freeze(
+  Object.fromEntries(products.filter((p) => p.cohort && p.sourceTag).map((product) => [product.sourceTag, product.cohort])),
+);
+
 export function getSourceTag(slug) {
   return sourceTagBySlug[slug] ?? null;
+}
+
+export function getCohort(slug) {
+  return cohortBySlug[slug] ?? null;
+}
+
+export function getCohortBySourceTag(sourceTag) {
+  return cohortBySourceTag[sourceTag] ?? null;
 }
