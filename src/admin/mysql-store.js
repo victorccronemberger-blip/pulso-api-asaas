@@ -608,14 +608,17 @@ export function createMySqlStore(databaseUrl) {
     async claimEnrollmentJob(enrollmentId) { await ensureSchema(); const [result]=await pool.query("UPDATE enrollments SET status='processing', attempts=attempts+1 WHERE id=? AND status='queued'",[enrollmentId]); return result.affectedRows>0; },
     async finishEnrollmentJob(enrollmentId, patch) { await ensureSchema(); await pool.query("UPDATE enrollments SET status=?, id_turma=?, turma_selection=?, user_id=?, result_json=?, error=? WHERE id=?",[patch.status,patch.idTurma ?? null,patch.turmaSelection ?? null,patch.userId ?? null,JSON.stringify(patch.result ?? null),patch.error ?? null,enrollmentId]); },
     async requeueEnrollmentJob(enrollmentId) { await ensureSchema(); const [result]=await pool.query("UPDATE enrollments SET status='queued', error=NULL WHERE id=? AND status IN ('failed','not_created','pending')",[enrollmentId]); return result.affectedRows>0; },
-    async recoverStaleEnrollments() {
+    async recoverStaleEnrollments(maxAgeMinutes = 45) {
       await ensureSchema();
-      // Só recupera jobs parados há 45+ minutos. Um polling legítimo chega a ~35
-      // min (30 de timeout + retries), e o heartbeat (touchEnrollmentJob) mantém
-      // updated_at fresco no processo dono. Janela menor que isso faz o boot de
-      // uma segunda instância roubar job vivo -> dois logins da mesma conta -> 401.
+      // Só recupera jobs parados há 45+ minutos (padrão). Um polling legítimo
+      // chega a ~35 min (30 de timeout + retries), e o heartbeat
+      // (touchEnrollmentJob) mantém updated_at fresco no processo dono. Janela
+      // menor que isso faz o boot de uma segunda instância roubar job vivo.
+      // maxAgeMinutes=0 libera tudo que está 'processing' — usado no shutdown
+      // gracioso para o próximo boot retomar imediatamente após um SIGTERM.
       const [result]=await pool.query(
-        "UPDATE enrollments SET status='queued' WHERE status='processing' AND updated_at < DATE_SUB(NOW(3), INTERVAL 45 MINUTE)",
+        "UPDATE enrollments SET status='queued' WHERE status='processing' AND updated_at < DATE_SUB(NOW(3), INTERVAL ? MINUTE)",
+        [maxAgeMinutes],
       );
       return result.affectedRows;
     },

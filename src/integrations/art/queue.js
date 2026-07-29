@@ -223,7 +223,14 @@ export function createEnrollmentQueue({ store, enrollmentService, environment, l
     shuttingDown = true;
     const deadline = Date.now() + timeoutMs;
     while (runningJobId && Date.now() < deadline) await sleep(500);
-    if (runningJobId) log(`[enrollment] shutdown timeout; job ${runningJobId} still running`);
+    if (runningJobId) {
+      log(`[enrollment] shutdown timeout; devolvendo job ${runningJobId} para a fila`);
+      // Libera imediatamente: num redeploy o próximo boot (segundos depois) retoma
+      // o job em vez de deixá-lo órfão até a janela de 45 min de stale recovery.
+      try {
+        if (typeof store.recoverStaleEnrollments === "function") await store.recoverStaleEnrollments(0);
+      } catch { /* noop */ }
+    }
   }
 
   function status() {

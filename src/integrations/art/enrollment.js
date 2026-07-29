@@ -115,10 +115,12 @@ export function createEnrollmentService(artClient, config = {}) {
     return valid;
   }
 
+  // Regra de negócio do contrato ART (atualizada em 2026-07-29 pelo Rafael):
+  // matricular na turma MAIS RECENTE com checkout ativo. A lista `valid` já
+  // chega ordenada desc (data de início, depois id) — valid[0] é a mais nova.
   function pickVigente(valid) {
-    const chosen = valid.length >= 2 ? valid[1] : valid[0];
-    const reason = valid.length >= 2 ? "penultima-vigente" : "turma-unica";
-    return { ...chosen, selectionReason: reason, allValid: valid };
+    const chosen = valid[0];
+    return { ...chosen, selectionReason: valid.length >= 2 ? "turma-mais-recente" : "turma-unica", allValid: valid };
   }
 
   // Resolve a turma de PROVISIONAMENTO (roda antes do login, sem RS256). Usa os
@@ -174,7 +176,6 @@ export function createEnrollmentService(artClient, config = {}) {
     const xApiKey = generateXApiKey();
     const carrierToken = await discoverCarrierToken(xApiKey);
     const provisionCandidates = candidateTurmas ?? (getCohortBySourceTag(tag) ? [getCohortBySourceTag(tag)] : null);
-    const turmaProvisao = await resolveTurma({ tag, candidateTurmas: provisionCandidates, xApiKey, carrierToken, onLog });
 
     const payloadDefaults = { phone: defaultPhone, birthDate: defaultBirthDate };
     const buyerData = {
@@ -182,11 +183,29 @@ export function createEnrollmentService(artClient, config = {}) {
       birthDate: birthDate || null,
       ...(address ?? {}),
     };
+
+    // Fast path: cohort do catálogo validado via prepare com o carrier.
+    // Se o cohort do catálogo está morto (checkout fechado — caso cfp_modular
+    // 3629 em produção, 2026-07-29), NÃO desiste: loga primeiro e descobre as
+    // turmas vivas com o RS256 da conta do comprador.
+    let turmaProvisao = null;
+    try {
+      turmaProvisao = await resolveTurma({ tag, candidateTurmas: provisionCandidates, xApiKey, carrierToken, onLog });
+    } catch (error) {
+      onLog(`[turma] catalogo sem turma ativa (${String(error).slice(0, 120)}) — tentando descoberta com login RS256`);
+    }
+
     let session = null;
     try {
       session = await artClient.login(email, cpf);
       onLog(`[enroll] conta existente user_id=${session.userId}`);
     } catch {
+      if (!turmaProvisao) {
+        // Conta nova + catálogo morto: sem login não há RS256 para listar turmas.
+        // O único caminho seria o catálogo — falha clara em vez de seguir sem turma.
+        onLog("[enroll] conta inexistente e catalogo sem turma ativa — descoberta RS256 impossivel sem login");
+        throw new Error(`catalogo sem turma ativa para tag=${tag} e conta nova (sem RS256 para descoberta dinamica)`);
+      }
       onLog("[enroll] conta inexistente -> fase 1: provisionamento via carrier");
       const fiProvisao = financialInstitution || (turmaProvisao.requiresFinancialInstitution ? "998" : "");
       const payload = buildEnrollPayload({
@@ -217,6 +236,17 @@ export function createEnrollmentService(artClient, config = {}) {
       }
       if (!session) throw new Error("conta nao provisionou em 120s");
       onLog(`[enroll] conta provisionada user_id=${session.userId}`);
+    }
+
+    // Catálogo morto + conta existente: descoberta autenticada das turmas vivas
+    // com o RS256 do comprador (o carrier alg=none não lista /services/turmas
+    // desde o patch da plataforma). Valida via prepare e escolhe a vigente.
+    if (!turmaProvisao) {
+      const ativas = await listActiveTurmasForTag({ tag, xApiKey, token: session.token, onLog });
+      const valid = await validateCandidatesViaPrepare({ tag, candidates: ativas, xApiKey, carrierToken });
+      if (!valid.length) throw new Error(`nenhuma turma com checkout ativo para tag=${tag} mesmo via descoberta RS256`);
+      turmaProvisao = pickVigente(valid);
+      onLog(`[turma] descoberta-RS256 resolveu provisao ${turmaProvisao.idTurma} (fallback de catalogo morto, ultima=${valid[0].idTurma}, total=${valid.length})`);
     }
 
     // Com o RS256 real do comprador, confirma/ajusta a turma dinamicamente.

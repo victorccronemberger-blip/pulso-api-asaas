@@ -44,6 +44,25 @@ function artPlatformMock({ dynamicTurmas, activeOnPrepare = new Set() } = {}) {
   return { calls, fetchImplementation: (url, options) => handler(url, options) };
 }
 
+test("resolveTurma escolhe a turma mais recente com checkout ativo (regra do contrato)", async () => {
+  const mock = artPlatformMock({
+    dynamicTurmas: [],
+    activeOnPrepare: new Set(["cfp-2026_54:4101", "cfp-2026_54:4099"]),
+  });
+  const client = createArtClient({ pollIntervalMs: 1, pollTimeoutMs: 100 }, mock.fetchImplementation);
+  const service = createEnrollmentService(client, {});
+  const logs = [];
+  const turma = await service.resolveTurma({
+    tag: "cfp-2026_54",
+    candidateTurmas: [4099, 4101],
+    xApiKey: "qualquer",
+    carrierToken: "qualquer",
+    onLog: (line) => logs.push(line),
+  });
+  assert.equal(turma.idTurma, 4101, "regra vigente: a turma MAIS RECENTE vence");
+  assert.equal(turma.selectionReason, "turma-mais-recente");
+});
+
 test("enrollStudent: provisão por cohort + descoberta dinâmica RS256 confirma a turma e efetiva", async () => {
   const dynamicTurmas = [
     { id_turma: 4155, tag_curso: "cfp-2026_54", nome: "10 anos", ativa: 1, data_inicio_aulas: "2026-07-02" },
@@ -234,6 +253,51 @@ test("enrollStudent: provisiona conta nova com os dados reais do comprador", asy
   assert.equal(phase1Payload.city, "Sao Paulo");
   assert.equal(phase1Payload.state, "SP");
   assert.equal(phase1Payload.post_code, "01310930");
+});
+
+test("enrollStudent: cohort do catalogo morto cai na descoberta RS256 da conta", async () => {
+  // Produção 2026-07-29: tag cfp_modular_12345678 com cohort 3629 sem checkout
+  // ativo (prepare 404). O fluxo NÃO pode morrer — loga na conta do comprador,
+  // lista as turmas vivas e escolhe uma delas.
+  const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
+  const dynamicTurmas = [
+    { id_turma: 4097, tag_curso: "cfp_modular_12345678", nome: "Modular T9", ativa: 1, data_inicio_aulas: "2026-08-01" },
+    { id_turma: 4100, tag_curso: "outra_tag", nome: "outra", ativa: 1, data_inicio_aulas: "2026-08-01" },
+  ];
+  async function handler(url, options = {}) {
+    const u = new URL(url);
+    const path = u.pathname;
+    if (path === "/api/login") return json({ response: { status: "SUCCESS", data: { token: "rs256-real-do-aluno", id: 11833 } } });
+    if (path === "/v1/checkout/prepare") {
+      const tag = u.searchParams.get("tag");
+      const idTurma = u.searchParams.get("id_turma");
+      if (tag === "cpa2026" && idTurma === "4058") return json({ course: { tag_curso: tag, nome: "CPA", valor_curso: 1500 } });
+      if (tag === "cfp_modular_12345678" && idTurma === "4097") return json({ course: { tag_curso: tag, nome: "Modular", valor_curso: 4998 } });
+      return json({ error: "Course not found" }, 404);
+    }
+    if (path === "/v1/services/turmas") return json({ current_page: 1, last_page: 1, data: dynamicTurmas });
+    if (path === "/v1/checkout/findStudent") return json({ error: "not found" }, 404);
+    if (path === "/v1/services/student/metrics") return json({}, 405);
+    if (path === "/v1/checkout/process/start") return json({ ok: true }, 200);
+    if (path === "/v1/services/aluno/findCoursesByStudent") return json([{ tag: "cfp_modular_12345678", status: "APPROVED", id_turma: 4097 }]);
+    return json({ error: "not found" }, 404);
+  }
+  const client = createArtClient({ pollIntervalMs: 1, pollTimeoutMs: 2000 }, handler);
+  const service = createEnrollmentService(client, { provisionTimeoutMs: 2000 });
+
+  const logs = [];
+  const result = await service.enrollStudent({
+    email: "modular@example.com",
+    cpf: "19100000000",
+    tag: "cfp_modular_12345678",
+    fullName: "Cliente Modular",
+    onLog: (line) => logs.push(line),
+  });
+
+  assert.equal(result.status, "CONFIRMED");
+  assert.equal(result.idTurma, 4097, "matriculou na turma descoberta via RS256, não no cohort morto do catálogo");
+  assert.ok(logs.some((l) => l.includes("catalogo sem turma ativa")), logs.join("\n"));
+  assert.ok(logs.some((l) => l.includes("descoberta-RS256 resolveu provisao 4097")), logs.join("\n"));
 });
 
 test("enrollStudent: alinha o documento ao perfil ja registrado na plataforma (mismatch de CPF)", async () => {
