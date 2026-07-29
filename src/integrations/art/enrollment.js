@@ -132,12 +132,20 @@ export function createEnrollmentService(artClient, config = {}) {
     return valid;
   }
 
-  // Regra de negócio ART (operador, 2026-07-29): NÃO pode ser a última turma —
-  // a vigente (ativa_no_site=1) tem valor real e type=free fica PENDING (não
-  // aprova). A PENÚLTIMA "já passou" pro sistema da ART → não tem mais valor
-  // (free, R$0) → type=free APROVA imediato. `valid` chega ordenada desc (mais
-  // recente primeiro) → penúltima = valid[1]; fallback valid[0] se houver só 1.
+  // Regra de negócio ART (operador, 2026-07-29): a turma vigente (última, paga)
+  // com type=free fica PENDING — não aprova. Turmas com valor_curso=0 (free /
+  // bônus de parceria: Santander, Fin4she, CAIXA, XP) aprovam imediato.
+  //
+  // Estratégia: preferir a turma FREE mais recente (valor_curso===0). Isso é
+  // mais robusto que a regra cega da penúltima (valid[1]), porque alguns cursos
+  // têm a turma free MAIS RECENTE que a paga (ex.: ancord-2026 — free XP-ART
+  // jul/2026 > paga T1 jun/2026; a penúltima cega pegava a paga).
+  // Fallback: se nenhuma turma é free, penúltima (regra original).
   function pickVigente(valid) {
+    const free = valid.filter((v) => Number(v.course?.valor_curso) === 0);
+    if (free.length) {
+      return { ...free[0], selectionReason: "free-mais-recente", allValid: valid };
+    }
     const chosen = valid.length >= 2 ? valid[1] : valid[0];
     return { ...chosen, selectionReason: valid.length >= 2 ? "penultima-turma" : "turma-unica", allValid: valid };
   }
