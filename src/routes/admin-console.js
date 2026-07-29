@@ -72,11 +72,11 @@ const PAGE_HTML = `<!doctype html>
         <select id="customer" size="6" style="margin-top:8px"></select>
         <div class="row">
           <div>
-            <label>Nome completo do aluno</label>
+            <label>Nome completo do aluno <span class="muted">(vazio = usa o do pedido pago)</span></label>
             <input id="fullname" placeholder="nome completo">
           </div>
           <div>
-            <label>CPF / CNPJ</label>
+            <label>CPF / CNPJ <span class="muted">(vazio = puxa do pedido pago)</span></label>
             <input id="doc" placeholder="somente numeros" inputmode="numeric">
           </div>
         </div>
@@ -262,6 +262,9 @@ $("form").addEventListener("submit", function (ev) {
         var ids = res.body.activation.enrollmentIds || [];
         var skipped = res.body.activation.skipped || [];
         var msg = "Ativacao iniciada: " + ids.length + " job(s).";
+        if (res.body.activation.buyer) {
+          msg += " Aluno: " + res.body.activation.buyer.fullName + " (doc ***" + res.body.activation.buyer.documentLast4 + (res.body.activation.buyer.fromOrder ? ", do pedido pago" : "") + ").";
+        }
         if (skipped.length) { msg += "\\nIgnorados: " + JSON.stringify(skipped); }
         show($("status"), "wait", msg);
         if (!ids.length) { $("activate-btn").disabled = false; return; }

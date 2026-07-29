@@ -255,6 +255,7 @@ export function createCheckoutRouter(express, {
   asaasClient,
   installmentService,
   store,
+  onAccessGranted = null,
 }) {
   const router = express.Router();
   const limiter = createFixedWindowLimiter();
@@ -458,6 +459,20 @@ export function createCheckoutRouter(express, {
         lines: quote.lines,
       });
       couponReservationBound = Boolean(quote.coupon);
+      // Rede de segurança: o webhook da Asaas pode ter confirmado o pagamento
+      // ANTES deste createOrder (Pix confirmando em segundos, ou cobrança criada
+      // fora do fluxo). Nessa corrida a order nasceu paga e sem dados do
+      // comprador, e o handler do webhook não conseguiu matricular. Agora que o
+      // pedido foi enriquecido com email/CPF/nome, dispara a concessão de acesso.
+      // A fila de matrícula é idempotente (dedupe por pedido+curso e cliente+curso).
+      if (localOrder.status === "paid" && onAccessGranted) {
+        onAccessGranted(localOrder.id).catch((error) => {
+          console.error("Could not enqueue enrollment for reconciled checkout order", {
+            orderId: localOrder.id,
+            type: error?.name,
+          });
+        });
+      }
       if (payment.method === "pix_installment") {
         try {
           await installmentService?.sync(localOrder);
@@ -575,7 +590,7 @@ export function createCheckoutRouter(express, {
       if (!localOrder || !["pix", "pix_installment"].includes(localOrder.paymentMethod)) {
         response.status(404).json({
           error: "order_not_found",
-          message: "NÃ£o encontramos este Pix na sua conta.",
+          message: "Não encontramos este Pix na sua conta.",
         });
         return;
       }
@@ -602,7 +617,7 @@ export function createCheckoutRouter(express, {
       });
       response.status(error?.status === 404 ? 404 : 502).json({
         error: "pix_retrieval_failed",
-        message: "O Pix foi criado, mas o QR Code ainda nÃ£o estÃ¡ disponÃ­vel. Tente novamente em instantes.",
+        message: "O Pix foi criado, mas o QR Code ainda não está disponível. Tente novamente em instantes.",
       });
     }
   });

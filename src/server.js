@@ -11,6 +11,9 @@ const server = app.listen(environment.port, environment.host, () => {
       fingerprint: createHash("sha256").update(environment.asaasApiKey).digest("hex").slice(0, 12),
     });
   }
+  if (environment.checkoutEnabled && !environment.enrollmentEnabled) {
+    console.warn("PULSO API checkout is ACTIVE with automatic enrollment DISABLED (ENROLLMENT_ENABLED!=true) — paid orders will NOT be auto-enrolled; use /admin for manual activation.");
+  }
 });
 
 ready

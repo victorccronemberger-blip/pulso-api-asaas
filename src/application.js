@@ -34,12 +34,17 @@ export function createApp(overrides = {}, dependencies = {}) {
   const installmentService = dependencies.installmentService
     ?? createInstallmentService({ asaasClient, store });
   const artIntegration = dependencies.artIntegration ?? createArtIntegration({ environment, store });
+  // Concessão de acesso pós-pagamento. Sem a integração de matrícula ligada
+  // (ENROLLMENT_ENABLED!=true), registra em log cada pedido pago que ficou
+  // pendente de ativação manual em vez de falhar em silêncio.
   const onAccessGranted = artIntegration
     ? async (orderId) => {
         const order = await store.getOrderWithItems(orderId);
         await artIntegration.queue.enqueueOrder(order);
       }
-    : null;
+    : async (orderId) => {
+        console.error("PULSO API payment confirmed but automatic enrollment is DISABLED (ENROLLMENT_ENABLED!=true); manual activation required.", { orderId });
+      };
   const app = express();
   const readiness = {
     status: "connecting",
@@ -104,6 +109,7 @@ export function createApp(overrides = {}, dependencies = {}) {
     asaasClient,
     installmentService,
     store,
+    onAccessGranted,
   }));
   app.use("/v1/customer", createCustomerRouter(express, {
     customerMailer,

@@ -11,21 +11,25 @@ const CSRF_COOKIE = "pulso_admin_csrf";
 const limit = (input, fallback, max) => Math.max(1, Math.min(max, Number(input) || fallback));
 const customerIdPattern = /^[0-9a-f-]{36}$/i;
 
+// Nome e documento são OPCIONAIS: o padrão é reutilizar os dados já capturados
+// no pedido pago do cliente (store.getCustomerBuyerProfile). Só precisam ser
+// digitados quando o cliente ainda não tem pedido com documento salvo.
 function activationInput(body) {
   const customerId = String(body?.customerId ?? "").trim();
   const fullName = String(body?.fullName ?? "").trim().replace(/\s+/g, " ");
-  const documentNumber = normalizeBrazilianTaxId(body?.documentNumber);
+  const documentRaw = String(body?.documentNumber ?? "").trim();
+  const documentNumber = documentRaw ? normalizeBrazilianTaxId(documentRaw) : null;
   const courseSlugs = Array.isArray(body?.courseSlugs)
     ? [...new Set(body.courseSlugs.map((slug) => String(slug).trim()))]
     : [];
   const catalogSlugs = new Set(adminCatalog.map((product) => product.slug));
-  if (!customerIdPattern.test(customerId)) throw new Error("Selecione um cliente vÃ¡lido.");
-  if (fullName.length < 3 || fullName.length > 180) throw new Error("Informe o nome completo do aluno.");
-  if (!documentNumber) throw new Error("Informe um CPF ou CNPJ vÃ¡lido.");
+  if (!customerIdPattern.test(customerId)) throw new Error("Selecione um cliente válido.");
+  if (fullName && (fullName.length < 3 || fullName.length > 180)) throw new Error("Informe o nome completo do aluno.");
+  if (documentRaw && !documentNumber) throw new Error("Informe um CPF ou CNPJ válido.");
   if (!courseSlugs.length || courseSlugs.length > adminCatalog.length || courseSlugs.some((slug) => !catalogSlugs.has(slug))) {
-    throw new Error("Selecione ao menos um curso ativo do catÃ¡logo.");
+    throw new Error("Selecione ao menos um curso ativo do catálogo.");
   }
-  return { customerId, fullName, documentNumber, courseSlugs };
+  return { customerId, fullName: fullName || null, documentNumber, courseSlugs };
 }
 
 function cookies(response, session, csrf, maxAge) {
@@ -91,7 +95,7 @@ export function createAdminRouter(express, { environment, store, queue }) {
   router.get("/enrollments/:id", requireAdmin, async (request, response) => { const enrollment = await store.getEnrollmentJob(request.params.id); if (!enrollment) return response.status(404).json({ error: "enrollment_not_found" }); response.json({ enrollment }); });
   router.post("/enrollments/:id/requeue", requireAdmin, requireCsrf, async (request, response) => { const requeued = await store.requeueEnrollmentJob(request.params.id); if (!requeued) return response.status(409).json({ error: "enrollment_not_requeueable" }); if (queue) queue.wake(); await audit(request, "enrollment.requeue", "enrollment", request.params.id); const enrollment = await store.getEnrollmentJob(request.params.id); response.json({ enrollment }); });
   router.post("/course-activations", requireAdmin, requireCsrf, async (request, response) => {
-    if (!queue?.enqueueManualActivation) return response.status(503).json({ error: "enrollment_unavailable", message: "A integraÃ§Ã£o de matrÃ­culas ainda nÃ£o estÃ¡ disponÃ­vel." });
+    if (!queue?.enqueueManualActivation) return response.status(503).json({ error: "enrollment_unavailable", message: "A integração de matrículas ainda não está disponível." });
     let input;
     try {
       input = activationInput(request.body);
@@ -99,18 +103,29 @@ export function createAdminRouter(express, { environment, store, queue }) {
       return response.status(400).json({ error: "invalid_activation", message: error.message });
     }
     const customer = await store.getCustomerById(input.customerId);
-    if (!customer) return response.status(404).json({ error: "customer_not_found", message: "Cliente nÃ£o encontrado." });
+    if (!customer) return response.status(404).json({ error: "customer_not_found", message: "Cliente não encontrado." });
+    const profile = typeof store.getCustomerBuyerProfile === "function"
+      ? await store.getCustomerBuyerProfile(customer.id)
+      : null;
+    const fullName = input.fullName || profile?.fullName || customer.displayName;
+    const documentNumber = input.documentNumber || profile?.documentNumber || null;
+    if (!documentNumber) {
+      return response.status(400).json({
+        error: "buyer_document_missing",
+        message: "Este cliente ainda não tem um pedido com CPF/CNPJ salvo; informe o documento manualmente.",
+      });
+    }
     const activation = await queue.enqueueManualActivation({
       customerId: customer.id,
       email: customer.email,
-      cpf: input.documentNumber,
-      fullName: input.fullName,
+      cpf: documentNumber,
+      fullName,
       courseSlugs: input.courseSlugs,
     });
     if (!activation.created) {
       return response.status(409).json({
         error: "courses_already_activated",
-        message: "Os cursos selecionados jÃ¡ possuem uma ativaÃ§Ã£o em andamento ou concluÃ­da para este cliente.",
+        message: "Os cursos selecionados já possuem uma ativação em andamento ou concluída para este cliente.",
         activation,
       });
     }
@@ -123,6 +138,7 @@ export function createAdminRouter(express, { environment, store, queue }) {
       activation: {
         ...activation,
         customer: { id: customer.id, email: customer.email, displayName: customer.displayName },
+        buyer: { fullName, documentLast4: documentNumber.slice(-4), fromOrder: !input.documentNumber },
       },
     });
   });

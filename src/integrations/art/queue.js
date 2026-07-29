@@ -74,7 +74,21 @@ export function createEnrollmentQueue({ store, enrollmentService, environment, l
 
   async function enqueueOrder(order) {
     if (!order) return { created: 0, skipped: [] };
-    if (!order.buyerEmail || !order.buyerCpf) {
+    // Order reconciliada por webhook nasce sem dados do comprador: resgata o
+    // documento/nome do pedido pago mais recente do MESMO cliente antes de
+    // desistir da matrícula.
+    const buyer = {
+      email: order.buyerEmail ?? null,
+      cpf: order.buyerCpf ?? null,
+      name: order.buyerName ?? null,
+    };
+    if ((!buyer.email || !buyer.cpf) && order.customerId && typeof store.getCustomerBuyerProfile === "function") {
+      const profile = await store.getCustomerBuyerProfile(order.customerId);
+      buyer.email ??= profile?.email ?? null;
+      buyer.cpf ??= profile?.documentNumber ?? null;
+      buyer.name ??= profile?.fullName ?? null;
+    }
+    if (!buyer.email || !buyer.cpf) {
       log(`[enrollment] order ${order.id} granted access but missing buyer email/cpf — cannot auto-enroll`);
       return { created: 0, skipped: (order.items ?? []).map((item) => item.courseSlug) };
     }
@@ -89,9 +103,9 @@ export function createEnrollmentQueue({ store, enrollmentService, environment, l
         customerId: order.customerId ?? null,
         courseSlug: item.courseSlug,
         sourceTag,
-        buyerEmail: order.buyerEmail,
-        buyerCpf: order.buyerCpf,
-        buyerName: order.buyerName ?? null,
+        buyerEmail: buyer.email,
+        buyerCpf: buyer.cpf,
+        buyerName: buyer.name,
       });
       if (id) created += 1;
     }

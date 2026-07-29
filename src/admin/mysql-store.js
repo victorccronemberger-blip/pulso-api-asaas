@@ -570,6 +570,20 @@ export function createMySqlStore(databaseUrl) {
       const [items] = await pool.query("SELECT id,course_slug,title FROM order_items WHERE order_id=? ORDER BY id", [orderId]);
       return { id: order.id, customerId: order.customer_id, buyerEmail: order.buyer_email, buyerCpf: order.buyer_cpf, buyerName: order.buyer_name, items: items.map((item) => ({ id: item.id, courseSlug: item.course_slug, title: item.title })) };
     },
+    // Documento, nome e contato do comprador resgatados do pedido mais recente do
+    // cliente que os tenha gravados (preferência para pedido pago). É a ponte para
+    // a matrícula quando o pedido reconciliado via webhook nasceu sem dados.
+    async getCustomerBuyerProfile(customerId) {
+      await ensureSchema();
+      const [[row]] = await pool.query(
+        `SELECT buyer_email AS email, buyer_name AS fullName, buyer_cpf AS documentNumber, buyer_phone AS mobilePhone
+         FROM orders
+         WHERE customer_id=? AND buyer_cpf IS NOT NULL AND buyer_cpf<>''
+         ORDER BY (status='paid' OR paid_cents>0) DESC, updated_at DESC LIMIT 1`,
+        [customerId],
+      );
+      return row ?? null;
+    },
     async createEnrollmentJob(job) {
       await ensureSchema();
       if (job.customerId) {

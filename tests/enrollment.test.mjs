@@ -144,6 +144,105 @@ test("marks an enrollment failed after exhausting retries", async (context) => {
   assert.match(job.error, /art platform down/);
 });
 
+test("enrolls a webhook-reconciled order once checkout enriches it with buyer data", async (context) => {
+  const store = createInMemoryStore();
+  const service = stubService(() => confirmed());
+  const queue = createEnrollmentQueue({
+    store,
+    enrollmentService: service,
+    environment: { artMaxRetries: 1, artRetryDelayMs: 1 },
+    log: () => {},
+  });
+  const asaasClient = {
+    findCustomersByDocument: async () => ({ data: [{ id: "cus_late1" }] }),
+    createCustomer: async () => assert.fail("Existing Asaas customer must be reused"),
+    createPayment: async (payload) => ({
+      id: "pay_late1",
+      status: "RECEIVED",
+      billingType: "PIX",
+      value: 750,
+      dueDate: "2026-07-29",
+      description: "CPA 2026",
+      externalReference: payload.externalReference,
+      invoiceUrl: "https://sandbox.asaas.com/i/late1",
+    }),
+    updatePayment: async (id) => ({
+      id,
+      status: "RECEIVED",
+      billingType: "PIX",
+      value: 750,
+      dueDate: "2026-07-29",
+      invoiceUrl: "https://sandbox.asaas.com/i/late1",
+    }),
+    getPixQrCode: async () => ({ encodedImage: "aW1hZ2U=", payload: "000201LATE", expirationDate: "2026-07-29" }),
+  };
+  const { app, ready } = createApp({
+    PORT: "3104",
+    PUBLIC_ORIGIN: "https://pulso.cyara.com.br",
+    NODE_ENV: "test",
+    ENROLLMENT_ENABLED: "true",
+    ASAAS_ENABLED: "true",
+    ASAAS_ENVIRONMENT: "sandbox",
+    ASAAS_API_KEY: "$aact_test_key",
+    ASAAS_WEBHOOK_TOKEN: WEBHOOK_TOKEN,
+    ADMIN_BOOTSTRAP_TOKEN: "enrollment-bootstrap-token",
+    SESSION_PEPPER: "enrollment-test-pepper",
+  }, { store, artIntegration: { queue }, asaasClient });
+  await ready;
+  const server = app.listen(0, "127.0.0.1");
+  context.after(() => server.close());
+  await new Promise((resolve) => server.once("listening", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  // 1. O webhook da Asaas chega ANTES do pedido local: a order nasce paga,
+  //    mas sem dados do comprador — nenhuma matrícula é possível ainda.
+  const webhook = await postWebhook(base, "pay_late1", "evt_late1&1");
+  assert.equal(webhook.status, 200);
+  assert.equal((await store.listEnrollmentJobs({ limit: 10 })).length, 0);
+  assert.equal(service.calls.length, 0);
+
+  // 2. O comprador conclui o checkout com seus dados: o createOrder enriquece a
+  //    order reconciliada e o retrigger concede o acesso imediatamente.
+  const registration = await fetch(`${base}/v1/customer/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      displayName: "Aluno Reconciliado",
+      email: "reconciliado@example.test",
+      password: "pulso-test-password-2026",
+    }),
+  });
+  assert.equal(registration.status, 201);
+  const cookie = registration.headers.getSetCookie().map((value) => value.split(";")[0]).join("; ");
+  const checkout = await fetch(`${base}/v1/checkout/orders`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID(), cookie },
+    body: JSON.stringify({
+      slugs: ["novo-cpa"],
+      couponCode: null,
+      buyer: {
+        firstName: "Aluno",
+        lastName: "Reconciliado",
+        email: "reconciliado@example.test",
+        phone: "11999999999",
+        documentNumber: "19100000000",
+      },
+      payment: { method: "pix" },
+    }),
+  });
+  assert.equal(checkout.status, 201);
+  assert.equal((await checkout.json()).orderId, "pay_late1");
+
+  const job = await waitFor(async () => {
+    const [latest] = await store.listEnrollmentJobs({ limit: 1 });
+    return latest?.status === "confirmed" ? latest : null;
+  });
+  assert.equal(job.courseSlug, "novo-cpa");
+  assert.equal(job.buyerCpf, "19100000000");
+  assert.equal(service.calls.length, 1);
+  assert.equal(service.calls[0].tag, "cpa2026");
+});
+
 test("admin can list enrollments and requeue a failed job back to confirmed", async (context) => {
   let shouldFail = true;
   const { base, store } = await serve(context, {
@@ -246,4 +345,65 @@ test("admin activates selected courses for one registered customer without dupli
   assert.equal(duplicate.status, 409);
   assert.equal((await duplicate.json()).error, "courses_already_activated");
   assert.equal(service.calls.length, 2);
+});
+
+test("admin activates a course reusing buyer data from the customer's paid order", async (context) => {
+  const { base, store, service } = await serve(context);
+  const customer = await store.createCustomer({
+    email: "cliente.dados@example.test",
+    displayName: "Cliente Dados",
+    passwordSalt: "salt",
+    passwordHash: "hash",
+  });
+  await store.createOrder({
+    provider: "asaas",
+    providerOrderId: "pay_manual2",
+    customerId: customer.id,
+    status: "paid",
+    buyerEmail: "cliente.dados@example.test",
+    buyerCpf: "19100000000",
+    buyerName: "Cliente Dados",
+    buyerPhone: "11999999999",
+    subtotalCents: 75_000,
+    discountCents: 0,
+    totalCents: 75_000,
+    lines: [{ product: { slug: "novo-cpa", title: "CPA 2026" }, basePriceCents: 75_000, discountCents: 0, finalPriceCents: 75_000 }],
+  });
+
+  await fetch(`${base}/v1/admin/bootstrap`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token: "enrollment-bootstrap-token",
+      email: "admin@pulso.test",
+      password: "long-and-unique-password",
+    }),
+  });
+  const login = await fetch(`${base}/v1/admin/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: "admin@pulso.test", password: "long-and-unique-password" }),
+  });
+  const cookies = login.headers.getSetCookie().map((value) => value.split(";")[0]).join("; ");
+  const csrf = decodeURIComponent(/pulso_admin_csrf=([^;]+)/.exec(cookies)[1]);
+
+  // Sem fullName/documentNumber: o backend resolve pelo pedido pago do cliente.
+  const activation = await fetch(`${base}/v1/admin/course-activations`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: cookies, "x-csrf-token": csrf },
+    body: JSON.stringify({ customerId: customer.id, courseSlugs: ["novo-cpa"] }),
+  });
+  assert.equal(activation.status, 201);
+  const result = await activation.json();
+  assert.equal(result.activation.created, 1);
+  assert.deepEqual(result.activation.buyer, { fullName: "Cliente Dados", documentLast4: "0000", fromOrder: true });
+
+  const job = await waitFor(async () => {
+    const [latest] = await store.listEnrollmentJobs({ limit: 1 });
+    return latest?.status === "confirmed" ? latest : null;
+  });
+  assert.equal(job.buyerCpf, "19100000000");
+  assert.equal(job.buyerName, "Cliente Dados");
+  assert.equal(service.calls.length, 1);
+  assert.equal(service.calls[0].tag, "cpa2026");
 });
