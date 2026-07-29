@@ -13,6 +13,7 @@ src/
 ├── domain/              catálogo, preços, status e regras de parcelas
 ├── http/                proteção de tráfego
 ├── integrations/asaas/  cliente oficial do gateway
+├── integrations/art/    matrícula na plataforma de cursos (ART)
 ├── routes/              APIs HTTP
 └── services/            sincronização do parcelamento Pix
 ```
@@ -59,6 +60,17 @@ parcelas forem quitadas.
 | `GET` | `/v1/admin/finance` | Série financeira |
 | `GET` | `/v1/admin/orders` | Pedidos e recebimentos |
 | `GET/POST/PATCH/DELETE` | `/v1/admin/coupons` | Gestão de cupons |
+| `GET` | `/v1/admin/customers` | Clientes (com contagem de ativações) |
+| `GET` | `/v1/admin/products` | Catálogo com `sourceTag`/`cohort` ART |
+| `GET/PUT` | `/v1/admin/campaign` | Campanha pública |
+| `GET` | `/v1/admin/audit` | Trilha de auditoria |
+| `GET` | `/v1/admin/enrollments` | Matrículas (jobs) e status |
+| `GET` | `/v1/admin/enrollments/:id` | Detalhe de uma matrícula |
+| `POST` | `/v1/admin/enrollments/:id/requeue` | Reenfileirar matrícula falha |
+| `POST` | `/v1/admin/enrollments/:id/verify` | Verificar/confirmar matrícula na plataforma |
+| `POST` | `/v1/admin/course-activations` | **Ativação manual** de cursos para um cliente |
+| `GET` | `/v1/public/campaign` | Campanha (loja) |
+| `POST` | `/v1/public/quote` | Cotação (loja) |
 
 Rotas de cliente e administrador usam cookies `HttpOnly`, CSRF e
 `Cache-Control: no-store`.
@@ -106,9 +118,41 @@ npm start
 Na primeira inicialização, a aplicação cria as tabelas ausentes e aplica
 migrações compatíveis sem apagar pedidos existentes.
 
+## Matrícula em cursos (integração ART)
+
+`src/integrations/art/` é a integração, de propriedade do operador, com a sua
+própria plataforma de cursos (Academia Rafael Toro — ART). Ela libera a matrícula
+do cliente quando o acesso é concedido (pagamento confirmado) **ou** por ativação
+manual no painel admin (`POST /v1/admin/course-activations`).
+
+Fluxo validado (sem nenhum token `alg=none`):
+
+1. `x-api-key` = RSA do segredo estático de checkout da plataforma.
+2. **Fase 1 — provisão**: `process/start` só com `x-api-key` + payload fiel à SPA
+   de checkout (cartão cifrado RSA, `detailsCupom` objeto, `getnet_fingerprint`,
+   `promo_opt_in`, `contract:true`) provisiona a conta do aluno (senha = CPF).
+3. **Login real**: `e-mail + CPF` → JWT **RS256** do aluno.
+4. **Fase 2 — efetivação**: `process/start` com o RS256 (`sub` == `user_id` do
+   e-mail) efetiva a matrícula; polling em `findCoursesByStudent` até `APPROVED`.
+
+A ativação manual e a automática compartilham a mesma fila serializada
+(`src/integrations/art/queue.js`), com retry, heartbeat e recuperação de jobs
+órfãos. Um job por vez porque o login na ART revoga o RS256 anterior.
+
+```text
+ENROLLMENT_ENABLED=true          # liga o motor de matrícula (default: false)
+ART_API_BASE / ART_IDM_BASE      # origens da plataforma
+ART_SERVICE_ACCOUNTS=email:senha,# descoberta de turmas em tempo real (login real)
+  email2:senha2
+ART_PROVISION_TIMEOUT_MS / ART_POLL_TIMEOUT_MS / ART_MAX_RETRIES / ...
+```
+
+O guard em `scripts/validate-build.mjs` proíbe `alg=none`/`forgeTransportJwt` em
+todo o `src/` (incluindo `integrations/art/`) — o transporte não assinado não pode
+ser reintroduzido em lugar nenhum.
+
 ## Limite de responsabilidade
 
-Este repositório não contém automação de matrícula em plataformas de terceiros.
-Uma integração futura de liberação de curso deve usar somente API oficial e
-autorizada, implementada como um adaptador separado. Pagamento confirmado não
-forja identidade nem executa checkout gratuito em outro sistema.
+O Asaas é a única fonte de verdade do pagamento; o backend nunca recebe dados
+brutos de cartão. A integração ART opera exclusivamente sobre a plataforma de
+cursos do próprio operador, com credenciais e fluxo autorizados.
