@@ -15,12 +15,23 @@ export function createEnrollmentQueue({ store, enrollmentService, environment, l
   let runningJobId = null;
 
   function processOnce(job) {
+    // Heartbeat: mantém updated_at fresco enquanto este processo é o dono do job.
+    // Sem ele, o boot de outra instância etiquetava o job como órfão e ROUBAVA
+    // o processamento — os dois loops logavam a mesma conta e a rotação de token
+    // da plataforma derrubava ambos com 401 cruzado.
+    let lastBeat = 0;
+    const beat = () => {
+      const nowTs = Date.now();
+      if (nowTs - lastBeat < 30_000) return;
+      lastBeat = nowTs;
+      if (typeof store.touchEnrollmentJob === "function") store.touchEnrollmentJob(job.id).catch(() => {});
+    };
     return enrollmentService.enrollStudent({
       email: job.buyerEmail,
       cpf: job.buyerCpf,
       tag: job.sourceTag,
       fullName: job.buyerName ?? "",
-      onLog: (line) => log(`${new Date().toISOString()} [enrollment:${job.id}] ${line}`),
+      onLog: (line) => { beat(); log(`${new Date().toISOString()} [enrollment:${job.id}] ${line}`); },
     });
   }
 

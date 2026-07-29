@@ -179,7 +179,8 @@ export function createInMemoryStore() {
     async claimEnrollmentJob(enrollmentId) { const e = enrollments.get(enrollmentId); if (!e || e.status !== "queued") return false; e.status = "processing"; e.attempts += 1; e.updatedAt = now(); return true; },
     async finishEnrollmentJob(enrollmentId, patch) { const e = enrollments.get(enrollmentId); if (!e) return; e.status = patch.status; e.idTurma = patch.idTurma ?? null; e.turmaSelection = patch.turmaSelection ?? null; e.userId = patch.userId ?? null; e.result = patch.result ?? null; e.error = patch.error ?? null; e.updatedAt = now(); },
     async requeueEnrollmentJob(enrollmentId) { const e = enrollments.get(enrollmentId); if (!e || !["failed", "not_created", "pending"].includes(e.status)) return false; e.status = "queued"; e.error = null; e.updatedAt = now(); return true; },
-    async recoverStaleEnrollments() { let count = 0; for (const e of enrollments.values()) if (e.status === "processing") { e.status = "queued"; count += 1; } return count; },
+    async recoverStaleEnrollments() { const cutoff = Date.now() - 45 * 60_000; let count = 0; for (const e of enrollments.values()) if (e.status === "processing" && Date.parse(e.updatedAt) < cutoff) { e.status = "queued"; count += 1; } return count; },
+    async touchEnrollmentJob(enrollmentId) { const e = enrollments.get(enrollmentId); if (e) e.updatedAt = now(); },
     async listEnrollmentJobs({ limit = 50, status } = {}) { return copy([...enrollments.values()].filter((e) => !status || e.status === status).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, limit)); },
     async getEnrollmentJob(enrollmentId) { return copy(enrollments.get(enrollmentId) ?? null); },
   };

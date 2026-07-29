@@ -205,12 +205,26 @@ export function createEnrollmentService(artClient, config = {}) {
     onLog(`[enroll] fase2 HTTP ${phase2.status}: ${String(phase2.text ?? "").slice(0, 180)}`);
 
     const pending = phase2.status === 400 || phase2.status === 500;
+    // Se outra sessão da mesma conta logar (instância concorrente, operador na
+    // plataforma), a nossa morre (401). Renova aqui dentro da MESMA tentativa
+    // em vez de derrubar o retry inteiro — re-login é barato, perder a ordem não.
+    const relogin = async () => {
+      try {
+        session = await artClient.login(email, cpf);
+        onLog(`[enroll] sessao renovada apos 401 (user_id=${session.userId})`);
+        return session.token;
+      } catch (error) {
+        onLog(`[enroll] re-login apos 401 falhou: ${String(error).slice(0, 140)}`);
+        return null;
+      }
+    };
     const wait = await artClient.waitForEnrollment({
       tag,
       email,
       xApiKey,
       token: session.token,
-      onProbe: ({ probe, status, courseCount }) => onLog(`[enroll] probe ${probe} HTTP ${status} cursos=${courseCount ?? "?"}`),
+      onProbe: ({ probe, status, courseCount, relogin: relogging }) => onLog(`[enroll] probe ${probe} HTTP ${status} cursos=${courseCount ?? "?"}${relogging ? " (401 -> renovando sessao)" : ""}`),
+      onUnauthorized: relogin,
     });
 
     if (!wait.enrollment) {

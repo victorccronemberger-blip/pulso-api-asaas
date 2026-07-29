@@ -106,20 +106,39 @@ export function createArtClient(config = {}, fetchImplementation = fetch) {
     });
   }
 
-  async function waitForEnrollment({ tag, email, xApiKey, token, timeoutMs, intervalMs, onProbe }) {
+  // Polling RS256 da matrícula. O 401 aqui NÃO é mais fatal: a plataforma revoga
+  // o token de outra sessão a cada login novo da mesma conta (rotação), e processos
+  // concorrentes (segunda instância da API, retry antigo) logavam guerra de tokens.
+  // Com onUnauthorized, o polling renova a sessão com jitter e SEGUE esperando —
+  // um 401 vira apenas uma pausa, não uma tentativa perdida.
+  async function waitForEnrollment({ tag, email, xApiKey, token, timeoutMs, intervalMs, onProbe, onUnauthorized }) {
     const deadline = Date.now() + Number(timeoutMs ?? pollTimeoutMs);
     const interval = Number(intervalMs ?? pollIntervalMs);
+    const maxRelogins = 5;
     let probe = 0;
+    let relogins = 0;
+    let currentToken = token;
     while (Date.now() < deadline) {
       probe += 1;
-      const { status, body } = await findCoursesByStudent({ email, xApiKey, token });
+      const { status, body } = await findCoursesByStudent({ email, xApiKey, token: currentToken });
       if (status === 200 && Array.isArray(body)) {
         const hit = body.find((course) => course?.tag === tag);
         if (hit) return { enrollment: hit, probe, courses: body };
         onProbe?.({ probe, status, courseCount: body.length });
+      } else if (status === 401 && onUnauthorized && relogins < maxRelogins) {
+        relogins += 1;
+        onProbe?.({ probe, status, courseCount: null, relogin: true });
+        // Jitter antes do re-login: se havia outra sessão concorrente da conta,
+        // o último login vence a rotação — o perdedor para de disputar.
+        await sleep(interval + Math.floor(Math.random() * (interval + 1)));
+        const nextToken = await onUnauthorized();
+        if (!nextToken) {
+          throw new ArtApiError("sessao perdida (401) e re-login indisponivel durante polling", { endpoint: "findCoursesByStudent", status });
+        }
+        currentToken = nextToken;
       } else {
         onProbe?.({ probe, status, courseCount: null });
-        if (status === 401) throw new ArtApiError("token revogado/invalido durante polling (401)", { endpoint: "findCoursesByStudent", status });
+        if (status === 401) throw new ArtApiError("token revogado/invalido durante polling (401), sem re-login possivel", { endpoint: "findCoursesByStudent", status });
       }
       await sleep(interval);
     }

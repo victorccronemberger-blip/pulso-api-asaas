@@ -119,6 +119,57 @@ test("enrollStudent: se a turma de provisão sai do ar, a descoberta dinâmica T
   assert.ok(logs.some((l) => l.includes("dinamica TROCOU")), logs.join("\n"));
 });
 
+test("enrollStudent: polling sobrevive a 401 renovando a sessao (rotacao de token)", async () => {
+  // Modela a guerra de tokens vista em producao: outra sessao da MESMA conta
+  // loga no meio do polling e revoga o RS256 corrente. O waitForEnrollment nao
+  // pode morrer no 401 — renova a sessao e continua esperando aprovacao.
+  const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
+  let logins = 0;
+  let currentToken = "";
+  const dynamicTurmas = [
+    { id_turma: 4155, tag_curso: "cfp-2026_54", nome: "10 anos", ativa: 1, data_inicio_aulas: "2026-07-02" },
+  ];
+  async function handler(url, options = {}) {
+    const u = new URL(url);
+    const path = u.pathname;
+    if (path === "/api/login") {
+      logins += 1;
+      currentToken = `rs256-v${logins}`;
+      return json({ response: { status: "SUCCESS", data: { token: currentToken, id: 204999 } } });
+    }
+    if (path === "/v1/checkout/prepare") return json({ course: { tag_curso: "cfp-2026_54", nome: "Curso", valor_curso: 9997 } });
+    if (path === "/v1/services/turmas") return json({ current_page: 1, last_page: 1, data: dynamicTurmas });
+    if (path === "/v1/services/student/metrics") return json({}, 405);
+    if (path === "/v1/checkout/process/start") return json({ error: ["Ops! O seu pagamento está sendo processado."] }, 400);
+    if (path === "/v1/services/aluno/findCoursesByStudent") {
+      const auth = options.headers?.Authorization ?? options.headers?.authorization ?? "";
+      if (auth !== `Bearer ${currentToken}`) return json({ message: "Unauthenticated." }, 401);
+      if (logins < 2) {
+        // outra sessao logou: o token atual vira lixo a partir do proximo probe
+        currentToken = "rs256-revogado-externamente";
+        return json([]);
+      }
+      return json([{ tag: "cfp-2026_54", status: "APPROVED", id_turma: 4155 }]);
+    }
+    return json({ error: "not found" }, 404);
+  }
+  const client = createArtClient({ pollIntervalMs: 1, pollTimeoutMs: 5000 }, handler);
+  const service = createEnrollmentService(client, { provisionTimeoutMs: 2000 });
+
+  const logs = [];
+  const result = await service.enrollStudent({
+    email: "guerra@example.com",
+    cpf: "19100000003",
+    tag: "cfp-2026_54",
+    fullName: "Cliente Guerra",
+    onLog: (line) => logs.push(line),
+  });
+
+  assert.equal(logins, 2, "precisou de um re-login depois da rotação");
+  assert.equal(result.status, "CONFIRMED", "polling sobreviveu ao 401 e confirmou a matrícula");
+  assert.ok(logs.some((l) => l.includes("sessao renovada apos 401")), logs.join("\n"));
+});
+
 test("enrollStudent: sem conta de serviço, a listagem com carrier alg=none é rejeitada (401) mas o fluxo segue via cohort", async () => {
   // dynamicTurmas vazio simula listagem dinâmica indisponível; cohort 4155 ainda ativa.
   const mock = artPlatformMock({

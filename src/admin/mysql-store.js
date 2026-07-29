@@ -598,7 +598,18 @@ export function createMySqlStore(databaseUrl) {
     async claimEnrollmentJob(enrollmentId) { await ensureSchema(); const [result]=await pool.query("UPDATE enrollments SET status='processing', attempts=attempts+1 WHERE id=? AND status='queued'",[enrollmentId]); return result.affectedRows>0; },
     async finishEnrollmentJob(enrollmentId, patch) { await ensureSchema(); await pool.query("UPDATE enrollments SET status=?, id_turma=?, turma_selection=?, user_id=?, result_json=?, error=? WHERE id=?",[patch.status,patch.idTurma ?? null,patch.turmaSelection ?? null,patch.userId ?? null,JSON.stringify(patch.result ?? null),patch.error ?? null,enrollmentId]); },
     async requeueEnrollmentJob(enrollmentId) { await ensureSchema(); const [result]=await pool.query("UPDATE enrollments SET status='queued', error=NULL WHERE id=? AND status IN ('failed','not_created','pending')",[enrollmentId]); return result.affectedRows>0; },
-    async recoverStaleEnrollments() { await ensureSchema(); const [result]=await pool.query("UPDATE enrollments SET status='queued' WHERE status='processing'"); return result.affectedRows; },
+    async recoverStaleEnrollments() {
+      await ensureSchema();
+      // Só recupera jobs parados há 45+ minutos. Um polling legítimo chega a ~35
+      // min (30 de timeout + retries), e o heartbeat (touchEnrollmentJob) mantém
+      // updated_at fresco no processo dono. Janela menor que isso faz o boot de
+      // uma segunda instância roubar job vivo -> dois logins da mesma conta -> 401.
+      const [result]=await pool.query(
+        "UPDATE enrollments SET status='queued' WHERE status='processing' AND updated_at < DATE_SUB(NOW(3), INTERVAL 45 MINUTE)",
+      );
+      return result.affectedRows;
+    },
+    async touchEnrollmentJob(enrollmentId) { await ensureSchema(); await pool.query("UPDATE enrollments SET updated_at=NOW(3) WHERE id=?",[enrollmentId]); },
     async listEnrollmentJobs({limit=50,status}={}) { await ensureSchema(); const [rows]=await pool.query(`SELECT * FROM enrollments ${status?"WHERE status=?":""} ORDER BY created_at DESC LIMIT ?`,status?[status,limit]:[limit]); return rows.map(enrollmentRow); },
     async getEnrollmentJob(enrollmentId) { await ensureSchema(); const [[row]]=await pool.query("SELECT * FROM enrollments WHERE id=?",[enrollmentId]); return enrollmentRow(row); },
   };
