@@ -136,20 +136,29 @@ export function createArtClient(config = {}, fetchImplementation = fetch) {
   // concorrentes (segunda instância da API, retry antigo) logavam guerra de tokens.
   // Com onUnauthorized, o polling renova a sessão com jitter e SEGUE esperando —
   // um 401 vira apenas uma pausa, não uma tentativa perdida.
-  async function waitForEnrollment({ tag, email, xApiKey, token, timeoutMs, intervalMs, onProbe, onUnauthorized }) {
+  async function waitForEnrollment({ tag, email, xApiKey, token, timeoutMs, intervalMs, onProbe, onUnauthorized, onProfileMissing }) {
     const deadline = Date.now() + Number(timeoutMs ?? pollTimeoutMs);
     const interval = Number(intervalMs ?? pollIntervalMs);
     const maxRelogins = 5;
+    const maxProfileResyncs = 3;
     let probe = 0;
     let relogins = 0;
+    let profileResyncs = 0;
     let currentToken = token;
     while (Date.now() < deadline) {
       probe += 1;
-      const { status, body } = await findCoursesByStudent({ email, xApiKey, token: currentToken });
+      const { status, body, text } = await findCoursesByStudent({ email, xApiKey, token: currentToken });
       if (status === 200 && Array.isArray(body)) {
         const hit = body.find((course) => course?.tag === tag);
         if (hit) return { enrollment: hit, probe, courses: body };
         onProbe?.({ probe, status, courseCount: body.length });
+      } else if (status === 500 && String(text ?? "").includes("id_usuario") && onProfileMissing && profileResyncs < maxProfileResyncs) {
+        // Finding #3 da pesquisa (08-FLUXO-DETERMINISTICO): 500 "id_usuario
+        // non-object" = linha do aluno ainda não existe. Re-dispara o side
+        // effect do student/metrics e segue esperando em vez de queimar polling.
+        profileResyncs += 1;
+        onProbe?.({ probe, status, courseCount: null, profileResync: true });
+        await onProfileMissing();
       } else if (status === 401 && onUnauthorized && relogins < maxRelogins) {
         relogins += 1;
         onProbe?.({ probe, status, courseCount: null, relogin: true });

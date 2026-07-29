@@ -236,6 +236,7 @@ export function createEnrollmentService(artClient, config = {}) {
       token: getToken(),
       onProbe: ({ probe, status, courseCount }) => onLog(`[enroll] recovery probe ${probe} HTTP ${status} cursos=${courseCount ?? "?"}`),
       onUnauthorized: relogin,
+      onProfileMissing: async () => { await artClient.syncStudentProfile({ xApiKey, token: getToken() }); },
     });
     if (!wait.enrollment) return null;
     return { enrollment: wait.enrollment, deletedOrderId };
@@ -394,13 +395,18 @@ export function createEnrollmentService(artClient, config = {}) {
         return null;
       }
     };
+    const resyncProfile = async () => {
+      onLog("[enroll] perfil do aluno ausente (500 id_usuario) — re-sincronizando via student/metrics");
+      await artClient.syncStudentProfile({ xApiKey, token: session.token });
+    };
     const wait = await artClient.waitForEnrollment({
       tag,
       email,
       xApiKey,
       token: session.token,
-      onProbe: ({ probe, status, courseCount, relogin: relogging }) => onLog(`[enroll] probe ${probe} HTTP ${status} cursos=${courseCount ?? "?"}${relogging ? " (401 -> renovando sessao)" : ""}`),
+      onProbe: ({ probe, status, courseCount, relogin: relogging, profileResync }) => onLog(`[enroll] probe ${probe} HTTP ${status} cursos=${courseCount ?? "?"}${relogging ? " (401 -> renovando sessao)" : ""}${profileResync ? " (perfil ausente -> re-sync)" : ""}`),
       onUnauthorized: relogin,
+      onProfileMissing: resyncProfile,
     });
 
     if (!wait.enrollment) {

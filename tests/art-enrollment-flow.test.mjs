@@ -361,6 +361,49 @@ test("enrollStudent: order PENDING zumbi é deletada e o re-enroll nasce APPROVE
   assert.ok(logs.some((l) => l.includes("DELETE order 9990001")), logs.join("\n"));
 });
 
+test("polling: 500 'id_usuario' re-dispara o sync do perfil e confirma (finding #3)", async () => {
+  // 08-FLUXO-DETERMINISTICO: findCoursesByStudent 500 com 'id_usuario non-object'
+  // significa que a linha do aluno ainda não existe. O polling re-dispara o
+  // side effect do student/metrics e continua — não queima a tentativa.
+  const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
+  let metricsCalls = 0;
+  let findCalls = 0;
+  const dynamicTurmas = [
+    { id_turma: 4155, tag_curso: "cfp-2026_54", nome: "10 anos", ativa: 1, data_inicio_aulas: "2026-07-02" },
+  ];
+  async function handler(url, options = {}) {
+    const u = new URL(url);
+    const path = u.pathname;
+    if (path === "/api/login") return json({ response: { status: "SUCCESS", data: { token: "rs256-real-do-aluno", id: 11833 } } });
+    if (path === "/v1/checkout/prepare") return json({ course: { tag_curso: "cfp-2026_54", nome: "Curso", valor_curso: 9997 } });
+    if (path === "/v1/services/turmas") return json({ current_page: 1, last_page: 1, data: dynamicTurmas });
+    if (path === "/v1/checkout/findStudent") return json({ error: "not found" }, 404);
+    if (path === "/v1/services/student/metrics") { metricsCalls += 1; return json({}, 405); }
+    if (path === "/v1/checkout/process/start") return json({ ok: true }, 200);
+    if (path === "/v1/services/aluno/findCoursesByStudent") {
+      findCalls += 1;
+      if (findCalls === 1) return json({ error: "Trying to get property 'id_usuario' of non-object" }, 500);
+      return json([{ tag: "cfp-2026_54", status: "APPROVED", id_turma: 4155 }]);
+    }
+    return json({ error: "not found" }, 404);
+  }
+  const client = createArtClient({ pollIntervalMs: 1, pollTimeoutMs: 3000 }, handler);
+  const service = createEnrollmentService(client, { provisionTimeoutMs: 2000 });
+
+  const logs = [];
+  const result = await service.enrollStudent({
+    email: "perfil-lento@example.com",
+    cpf: "19100000000",
+    tag: "cfp-2026_54",
+    fullName: "Perfil Lento",
+    onLog: (line) => logs.push(line),
+  });
+
+  assert.equal(result.status, "CONFIRMED");
+  assert.ok(metricsCalls >= 2, `student/metrics re-disparado no 500 id_usuario (calls=${metricsCalls})`);
+  assert.ok(logs.some((l) => l.includes("perfil ausente -> re-sync")), logs.join("\n"));
+});
+
 test("enrollStudent: alinha o documento ao perfil ja registrado na plataforma (mismatch de CPF)", async () => {
   // Caso Karine (producao 2026-07-29): conta existente com documento A no perfil
   // da plataforma, pedido PULSO com documento B. A fase 2 precisa mandar o
