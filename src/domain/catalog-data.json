@@ -153,8 +153,7 @@
       "cfp",
       "exame 54",
       "60 dias"
-    ],
-    "active": false
+    ]
   },
   {
     "slug": "cfp-modular-completo",
@@ -172,8 +171,7 @@
       "cfp",
       "modular",
       "planejamento"
-    ],
-    "active": false
+    ]
   },
   {
     "slug": "cga-2026",
@@ -651,8 +649,8 @@
     "kind": "course",
     "accent": "#A0001C",
     "cohort": "4129",
-    "officialPriceCents": 200000,
-    "priceCents": 100000,
+    "officialPriceCents": 999800,
+    "priceCents": 499900,
     "featured": false,
     "keywords": [
       "cfp",
