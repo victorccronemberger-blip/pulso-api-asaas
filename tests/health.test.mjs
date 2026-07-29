@@ -430,6 +430,74 @@ test("rejects Pix installment plans above six installments", async (context) => 
   assert.equal((await response.json()).error, "invalid_installments");
 });
 
+test("rejects malformed birth date or address before calling Asaas", async (context) => {
+  const asaasClient = {
+    findCustomersByDocument: async () => assert.fail("Asaas must not be called"),
+  };
+  const origin = await serve(context, enabledEnvironment, { asaasClient });
+  const headers = await authenticatedHeaders(origin);
+  for (const badBuyer of [
+    { ...buyer(), birthDate: "10/05/1985" },
+    { ...buyer(), birthDate: "2035-01-01" },
+    { ...buyer(), address: { postCode: "1300" } },
+    { ...buyer(), address: { state: "XX" } },
+  ]) {
+    const response = await fetch(`${origin}/v1/checkout/orders`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ slugs: ["novo-cpa"], couponCode: null, buyer: badBuyer, payment: { method: "pix" } }),
+    });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /invalid_birth_date|invalid_address/);
+  }
+});
+
+test("persists full buyer identity for later enrollment use", async (context) => {
+  const store = createInMemoryStore();
+  const asaasClient = {
+    findCustomersByDocument: async () => ({ data: [{ id: "cus_full_buyer" }] }),
+    createCustomer: async () => assert.fail("Existing customer must be reused"),
+    createPayment: async (payload) => ({
+      id: "pay_full_buyer",
+      status: "PENDING",
+      billingType: "PIX",
+      value: 750,
+      dueDate: "2026-07-29",
+      description: "CPA 2026",
+      externalReference: payload.externalReference,
+      invoiceUrl: "https://sandbox.asaas.com/i/fullbuyer",
+    }),
+    updatePayment: async (id) => ({ id, status: "PENDING", invoiceUrl: "https://sandbox.asaas.com/i/fullbuyer" }),
+    getPixQrCode: async () => ({ encodedImage: "aW1hZ2U=", payload: "000201FULL" }),
+  };
+  const origin = await serve(context, enabledEnvironment, { store, asaasClient });
+  const address = {
+    postCode: "13000000",
+    street: "Rua das Palmas",
+    number: "45",
+    complement: "Apto 71",
+    district: "Jardim",
+    city: "Campinas",
+    state: "SP",
+  };
+  const response = await fetch(`${origin}/v1/checkout/orders`, {
+    method: "POST",
+    headers: await authenticatedHeaders(origin),
+    body: JSON.stringify({
+      slugs: ["novo-cpa"],
+      couponCode: null,
+      buyer: { ...buyer(), birthDate: "1985-05-10", address },
+      payment: { method: "pix" },
+    }),
+  });
+  assert.equal(response.status, 201);
+  const [listed] = await store.listOrders({ limit: 1 });
+  const stored = await store.getOrderWithItems(listed.id);
+  assert.equal(stored.buyerBirthDate, "1985-05-10");
+  assert.deepEqual(stored.buyerAddress, address);
+  assert.equal(stored.buyerPhone, "11999999999");
+});
+
 test("rejects invalid CPF or CNPJ before calling Asaas", async (context) => {
   const asaasClient = {
     findCustomersByDocument: async () => assert.fail("Asaas must not be called"),

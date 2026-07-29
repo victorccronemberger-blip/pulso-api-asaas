@@ -77,6 +77,48 @@ function cleanText(value, min, max, label) {
   return text;
 }
 
+const BRAZILIAN_STATES = new Set([
+  "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT", "MS", "MG",
+  "PA", "PB", "PR", "PE", "PI", "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO",
+]);
+
+function cleanBirthDate(value) {
+  if (value === undefined || value === null || String(value).trim() === "") return null;
+  const date = String(value).trim().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(Date.parse(`${date}T00:00:00Z`))) {
+    throw new CheckoutInputError("Data de nascimento inválida.", "invalid_birth_date");
+  }
+  const year = Number(date.slice(0, 4));
+  const nowYear = new Date().getUTCFullYear();
+  if (year < 1900 || year > nowYear - 10) {
+    throw new CheckoutInputError("Data de nascimento inválida.", "invalid_birth_date");
+  }
+  return date;
+}
+
+// Endereço completo do comprador. Todos opcionais na API (frontends antigos não
+// enviam), mas validados quando presentes — a matrícula os usa para montar o
+// perfil do aluno na plataforma de cursos sem defaults fabricados.
+function cleanAddress(input) {
+  if (!input || typeof input !== "object") return null;
+  const digits = (value, max) => String(value ?? "").replace(/\D/g, "").slice(0, max) || null;
+  const text = (value, max) => String(value ?? "").trim().replace(/\s+/g, " ").slice(0, max) || null;
+  const state = text(input.state ?? input.uf, 2)?.toUpperCase() ?? null;
+  if (state && !BRAZILIAN_STATES.has(state)) throw new CheckoutInputError("UF inválida.", "invalid_address");
+  const postCode = digits(input.postCode ?? input.cep, 8);
+  if (postCode && postCode.length !== 8) throw new CheckoutInputError("CEP inválido.", "invalid_address");
+  const address = {
+    postCode,
+    street: text(input.street ?? input.rua, 160),
+    number: text(input.number ?? input.numero, 16),
+    complement: text(input.complement ?? input.complemento, 160),
+    district: text(input.district ?? input.bairro, 120),
+    city: text(input.city ?? input.cidade, 120),
+    state,
+  };
+  return Object.values(address).some(Boolean) ? address : null;
+}
+
 function parseBuyer(input, requestIp) {
   if (!input || typeof input !== "object") throw new CheckoutInputError("Dados do comprador inválidos.");
   const email = String(input.email ?? "").trim().toLowerCase();
@@ -92,6 +134,8 @@ function parseBuyer(input, requestIp) {
     email,
     mobilePhone: cleanDigits(input.phone, 10, 13, "Telefone"),
     cpfCnpj: cleanDocument(input.documentNumber),
+    birthDate: cleanBirthDate(input.birthDate ?? input.birth_date),
+    address: cleanAddress(input.address),
     ip,
   };
 }
@@ -187,6 +231,14 @@ async function findOrCreateCustomer(asaasClient, buyer, key) {
     cpfCnpj: buyer.cpfCnpj,
     email: buyer.email,
     mobilePhone: buyer.mobilePhone,
+    // endereço completo quando coletado: melhora o cadastro do pagador na Asaas
+    ...(buyer.address?.street ? {
+      address: buyer.address.street,
+      addressNumber: buyer.address.number ?? "S/N",
+      complement: buyer.address.complement ?? undefined,
+      province: buyer.address.district ?? undefined,
+      postalCode: buyer.address.postCode ?? undefined,
+    } : {}),
     externalReference: `pulso-customer:${key}`,
   });
   return providerId(created?.id, "customer id");
@@ -448,6 +500,8 @@ export function createCheckoutRouter(express, {
         buyerCpf: buyer.cpfCnpj,
         buyerName: buyer.name,
         buyerPhone: buyer.mobilePhone,
+        buyerBirthDate: buyer.birthDate,
+        buyerAddress: buyer.address,
         customerId: accountSession.customer.id,
         paymentMethod: payment.method,
         installments: payment.installments,

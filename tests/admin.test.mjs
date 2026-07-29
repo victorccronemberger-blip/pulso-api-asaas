@@ -134,6 +134,37 @@ test("keeps pending checkout attempts fail-closed and allows only explicit safe 
   assert.equal((await store.beginCheckoutAttempt(key, "a".repeat(64))).kind, "new");
 });
 
+test("buyer profile carries birth date and full address from the paid order", async () => {
+  const store = createInMemoryStore();
+  const customer = await store.createCustomer({ email: "perfil@example.test", displayName: "Perfil Completo", passwordSalt: "salt", passwordHash: "hash" });
+  const address = { postCode: "13000000", street: "Rua das Palmas", number: "45", complement: "Apto 71", district: "Jardim", city: "Campinas", state: "SP" };
+  await store.createOrder({
+    provider: "asaas",
+    providerOrderId: "pay_profile1",
+    customerId: customer.id,
+    status: "paid",
+    buyerEmail: "perfil@example.test",
+    buyerCpf: "19100000000",
+    buyerName: "Perfil Completo",
+    buyerPhone: "11988887777",
+    buyerBirthDate: "1985-05-10",
+    buyerAddress: address,
+    subtotalCents: 75_000,
+    discountCents: 0,
+    totalCents: 75_000,
+    lines: [],
+  });
+  const profile = await store.getCustomerBuyerProfile(customer.id);
+  assert.deepEqual(profile, {
+    email: "perfil@example.test",
+    fullName: "Perfil Completo",
+    documentNumber: "19100000000",
+    mobilePhone: "11988887777",
+    birthDate: "1985-05-10",
+    address,
+  });
+});
+
 test("order status cannot regress when gateway events arrive out of order", () => {
   assert.equal(resolveOrderStatus("processing", "created"), "processing");
   assert.equal(resolveOrderStatus("failed", "open"), "failed");

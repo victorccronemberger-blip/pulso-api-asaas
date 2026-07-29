@@ -17,6 +17,7 @@ export function buildEnrollPayload({
   number = "123",
   district = "Centro",
   postCode = "01000000",
+  complement = "",
   affiliate = "",
 }) {
   return {
@@ -41,7 +42,7 @@ export function buildEnrollPayload({
     card: "",
     installments: 1,
     afiliado: affiliate,
-    complement: "",
+    complement,
     contract: false,
     contractPrivacity: false,
     detailsCupom: "",
@@ -165,13 +166,22 @@ export function createEnrollmentService(artClient, config = {}) {
     return chosen;
   }
 
-  async function enrollStudent({ email, cpf, tag, fullName, financialInstitution = "", affiliate = "", candidateTurmas = null, onLog = () => {} }) {
+  // phone/birthDate/address vêm do pedido PULSO (coletados no checkout). Entram
+  // no payload quando a conta é provisionada por nós (fase 1) e como fallback
+  // quando o perfil da plataforma está vazio — nunca mais "Rua Test"/"11999999999"
+  // poluindo o cadastro de um cliente real.
+  async function enrollStudent({ email, cpf, tag, fullName, phone = null, birthDate = null, address = null, financialInstitution = "", affiliate = "", candidateTurmas = null, onLog = () => {} }) {
     const xApiKey = generateXApiKey();
     const carrierToken = await discoverCarrierToken(xApiKey);
     const provisionCandidates = candidateTurmas ?? (getCohortBySourceTag(tag) ? [getCohortBySourceTag(tag)] : null);
     const turmaProvisao = await resolveTurma({ tag, candidateTurmas: provisionCandidates, xApiKey, carrierToken, onLog });
 
     const payloadDefaults = { phone: defaultPhone, birthDate: defaultBirthDate };
+    const buyerData = {
+      phone: phone || null,
+      birthDate: birthDate || null,
+      ...(address ?? {}),
+    };
     let session = null;
     try {
       session = await artClient.login(email, cpf);
@@ -179,7 +189,25 @@ export function createEnrollmentService(artClient, config = {}) {
     } catch {
       onLog("[enroll] conta inexistente -> fase 1: provisionamento via carrier");
       const fiProvisao = financialInstitution || (turmaProvisao.requiresFinancialInstitution ? "998" : "");
-      const payload = buildEnrollPayload({ tag, idTurma: turmaProvisao.idTurma, email, fullName, cpf, financialInstitution: fiProvisao, affiliate, ...payloadDefaults });
+      const payload = buildEnrollPayload({
+        tag,
+        idTurma: turmaProvisao.idTurma,
+        email,
+        fullName,
+        cpf,
+        financialInstitution: fiProvisao,
+        affiliate,
+        phone: buyerData.phone ?? payloadDefaults.phone,
+        birthDate: buyerData.birthDate ?? payloadDefaults.birthDate,
+        ...(buyerData.city || buyerData.postCode ? {
+          city: buyerData.city ?? "Sao Paulo",
+          state: buyerData.state ?? "SP",
+          street: buyerData.street ?? "Rua Test",
+          number: buyerData.number ?? "123",
+          district: buyerData.district ?? "Centro",
+          postCode: buyerData.postCode ?? "01000000",
+        } : {}),
+      });
       const phase1 = await artClient.startCheckoutProcess({ payload, xApiKey, token: carrierToken });
       onLog(`[enroll] fase1 HTTP ${phase1.status} (500/400 podem ser normais no provisionamento)`);
       const deadline = Date.now() + provisionTimeoutMs;
@@ -209,17 +237,21 @@ export function createEnrollmentService(artClient, config = {}) {
       if (found.status === 200 && found.body && typeof found.body === "object") platformProfile = found.body;
     } catch { /* sonda tolerante: segue com os dados do pedido */ }
     const platformDocument = digitsOnly(platformProfile?.documento);
+    // Prioridade de cada variável: perfil da plataforma > dados do pedido PULSO
+    // > defaults de pesquisa. Garante que cliente novo nasce com dados reais e
+    // cliente antigo não colide com o que já está registrado na plataforma.
     const identity = {
       cpf: platformDocument ?? cpf,
       fullName: [platformProfile?.nome, platformProfile?.sobre_nome].filter(Boolean).join(" ").trim() || fullName,
-      phone: digitsOnly(platformProfile?.telefone) ?? defaultPhone,
-      birthDate: String(platformProfile?.dt_nascimento ?? "").slice(0, 10) || defaultBirthDate,
-      city: platformProfile?.cidade || "Sao Paulo",
-      state: platformProfile?.uf || "SP",
-      street: platformProfile?.rua || "Rua Test",
-      number: String(platformProfile?.numero ?? "").trim() || "123",
-      district: platformProfile?.bairro || "Centro",
-      postCode: digitsOnly(platformProfile?.cep) ?? "01000000",
+      phone: digitsOnly(platformProfile?.telefone) ?? buyerData.phone ?? defaultPhone,
+      birthDate: String(platformProfile?.dt_nascimento ?? "").slice(0, 10) || buyerData.birthDate || defaultBirthDate,
+      city: platformProfile?.cidade || buyerData.city || "Sao Paulo",
+      state: platformProfile?.uf || buyerData.state || "SP",
+      street: platformProfile?.rua || buyerData.street || "Rua Test",
+      number: String(platformProfile?.numero ?? "").trim() || buyerData.number || "123",
+      district: platformProfile?.bairro || buyerData.district || "Centro",
+      postCode: digitsOnly(platformProfile?.cep) ?? buyerData.postCode ?? "01000000",
+      complement: String(platformProfile?.complement ?? "").trim() || buyerData.complement || "",
     };
     if (platformDocument && platformDocument !== cpf) {
       onLog(`[enroll] perfil da plataforma tem doc ...${platformDocument.slice(-4)} DIFERENTE do pedido ...${String(cpf).slice(-4)} — usando o da plataforma`);
@@ -243,6 +275,7 @@ export function createEnrollmentService(artClient, config = {}) {
       number: identity.number,
       district: identity.district,
       postCode: identity.postCode,
+      complement: identity.complement,
       affiliate,
     });
     const phase2 = await artClient.startCheckoutProcess({ payload, xApiKey, token: session.token });

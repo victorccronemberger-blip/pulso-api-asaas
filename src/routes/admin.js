@@ -131,6 +131,9 @@ export function createAdminRouter(express, { environment, store, queue }) {
       email: customer.email,
       cpf: documentNumber,
       fullName,
+      phone: profile?.mobilePhone ?? null,
+      birthDate: profile?.birthDate ?? null,
+      address: profile?.address ?? null,
       courseSlugs: input.courseSlugs,
     });
     if (!activation.created) {

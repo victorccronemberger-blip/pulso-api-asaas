@@ -19,7 +19,7 @@ const paymentInstallment = (row) => row && ({
   paymentUrl: row.payment_url,
   paidAt: iso(row.paid_at),
 });
-const enrollmentRow = (row) => row && ({ id: row.id, orderId: row.order_id, orderItemId: row.order_item_id, customerId: row.customer_id, courseSlug: row.course_slug, sourceTag: row.source_tag, status: row.status, attempts: Number(row.attempts), idTurma: row.id_turma, turmaSelection: row.turma_selection, userId: row.user_id, result: fromJson(row.result_json, null), error: row.error, buyerEmail: row.buyer_email, buyerCpf: row.buyer_cpf, buyerName: row.buyer_name, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) });
+const enrollmentRow = (row) => row && ({ id: row.id, orderId: row.order_id, orderItemId: row.order_item_id, customerId: row.customer_id, courseSlug: row.course_slug, sourceTag: row.source_tag, status: row.status, attempts: Number(row.attempts), idTurma: row.id_turma, turmaSelection: row.turma_selection, userId: row.user_id, result: fromJson(row.result_json, null), error: row.error, buyerEmail: row.buyer_email, buyerCpf: row.buyer_cpf, buyerName: row.buyer_name, buyerBirthDate: row.buyer_birth_date ?? null, buyerAddress: fromJson(row.buyer_address_json, null), buyerPhone: row.buyer_phone ?? null, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) });
 
 export function createMySqlStore(databaseUrl) {
   const pool = mysql.createPool({ uri: databaseUrl, timezone: "Z", dateStrings: true });
@@ -64,6 +64,11 @@ export function createMySqlStore(databaseUrl) {
       if (!orderColumnNames.has("paid_cents")) await pool.query("ALTER TABLE orders ADD COLUMN paid_cents INT UNSIGNED NOT NULL DEFAULT 0 AFTER total_cents");
       if (!orderColumnNames.has("paid_installments")) await pool.query("ALTER TABLE orders ADD COLUMN paid_installments TINYINT UNSIGNED NOT NULL DEFAULT 0 AFTER paid_cents");
       if (!orderColumnNames.has("access_granted_at")) await pool.query("ALTER TABLE orders ADD COLUMN access_granted_at DATETIME(3) NULL AFTER paid_installments");
+      // Dados completos do comprador coletados no checkout (nascimento + endereco
+      // completo). Alimentam o perfil do aluno na plataforma de cursos — sem eles
+      // a matrícula caía em defaults fabricados e colidia com perfis antigos.
+      if (!orderColumnNames.has("buyer_birth_date")) await pool.query("ALTER TABLE orders ADD COLUMN buyer_birth_date VARCHAR(10) NULL AFTER buyer_phone");
+      if (!orderColumnNames.has("buyer_address_json")) await pool.query("ALTER TABLE orders ADD COLUMN buyer_address_json JSON NULL AFTER buyer_birth_date");
       await pool.query("UPDATE orders SET paid_cents=total_cents,paid_installments=1,access_granted_at=COALESCE(access_granted_at,updated_at) WHERE status='paid' AND paid_cents=0");
       if (orderColumnNames.has("appmax_order_id")) {
         await pool.query("ALTER TABLE orders MODIFY appmax_order_id BIGINT UNSIGNED NULL");
@@ -103,6 +108,9 @@ export function createMySqlStore(databaseUrl) {
       );
       const [enrollmentColumns] = await pool.query("SHOW COLUMNS FROM enrollments");
       const enrollmentColumnNames = new Set(enrollmentColumns.map((column) => column.Field));
+      if (!enrollmentColumnNames.has("buyer_birth_date")) await pool.query("ALTER TABLE enrollments ADD COLUMN buyer_birth_date VARCHAR(10) NULL AFTER buyer_name");
+      if (!enrollmentColumnNames.has("buyer_address_json")) await pool.query("ALTER TABLE enrollments ADD COLUMN buyer_address_json JSON NULL AFTER buyer_birth_date");
+      if (!enrollmentColumnNames.has("buyer_phone")) await pool.query("ALTER TABLE enrollments ADD COLUMN buyer_phone VARCHAR(13) NULL AFTER buyer_address_json");
       const orderIdColumn = enrollmentColumns.find((column) => column.Field === "order_id");
       if (orderIdColumn?.Null === "NO") await pool.query("ALTER TABLE enrollments MODIFY order_id CHAR(36) NULL");
       if (!enrollmentColumnNames.has("customer_id")) await pool.query("ALTER TABLE enrollments ADD COLUMN customer_id CHAR(36) NULL AFTER order_item_id");
@@ -224,14 +232,14 @@ export function createMySqlStore(databaseUrl) {
         const status = resolveOrderStatus(existing?.status, order.status);
         if (existing) {
           await connection.query(
-            "UPDATE orders SET provider_order_id=?,provider_group_id=?,status=?,buyer_email=?,buyer_cpf=?,buyer_name=?,buyer_phone=?,customer_id=?,payment_method=?,installments=?,installment_cents=?,subtotal_cents=?,discount_cents=?,total_cents=?,coupon_code=? WHERE id=?",
-            [order.providerOrderId, order.providerGroupId ?? null, status, order.buyerEmail, order.buyerCpf ?? null, order.buyerName ?? null, order.buyerPhone ?? null, order.customerId ?? null, order.paymentMethod ?? null, order.installments ?? null, order.installmentCents ?? null, order.subtotalCents, order.discountCents, order.totalCents, order.couponCode, orderId],
+            "UPDATE orders SET provider_order_id=?,provider_group_id=?,status=?,buyer_email=?,buyer_cpf=?,buyer_name=?,buyer_phone=?,buyer_birth_date=?,buyer_address_json=?,customer_id=?,payment_method=?,installments=?,installment_cents=?,subtotal_cents=?,discount_cents=?,total_cents=?,coupon_code=? WHERE id=?",
+            [order.providerOrderId, order.providerGroupId ?? null, status, order.buyerEmail, order.buyerCpf ?? null, order.buyerName ?? null, order.buyerPhone ?? null, order.buyerBirthDate ?? null, order.buyerAddress ? JSON.stringify(order.buyerAddress) : null, order.customerId ?? null, order.paymentMethod ?? null, order.installments ?? null, order.installmentCents ?? null, order.subtotalCents, order.discountCents, order.totalCents, order.couponCode, orderId],
           );
           await connection.query("DELETE FROM order_items WHERE order_id=?", [orderId]);
         } else {
           await connection.query(
-            "INSERT INTO orders (id,provider,provider_order_id,provider_group_id,status,buyer_email,buyer_cpf,buyer_name,buyer_phone,customer_id,payment_method,installments,installment_cents,subtotal_cents,discount_cents,total_cents,coupon_code) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            [orderId, order.provider, order.providerOrderId, order.providerGroupId ?? null, status, order.buyerEmail, order.buyerCpf ?? null, order.buyerName ?? null, order.buyerPhone ?? null, order.customerId ?? null, order.paymentMethod ?? null, order.installments ?? null, order.installmentCents ?? null, order.subtotalCents, order.discountCents, order.totalCents, order.couponCode],
+            "INSERT INTO orders (id,provider,provider_order_id,provider_group_id,status,buyer_email,buyer_cpf,buyer_name,buyer_phone,buyer_birth_date,buyer_address_json,customer_id,payment_method,installments,installment_cents,subtotal_cents,discount_cents,total_cents,coupon_code) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [orderId, order.provider, order.providerOrderId, order.providerGroupId ?? null, status, order.buyerEmail, order.buyerCpf ?? null, order.buyerName ?? null, order.buyerPhone ?? null, order.buyerBirthDate ?? null, order.buyerAddress ? JSON.stringify(order.buyerAddress) : null, order.customerId ?? null, order.paymentMethod ?? null, order.installments ?? null, order.installmentCents ?? null, order.subtotalCents, order.discountCents, order.totalCents, order.couponCode],
           );
         }
         for (const line of order.lines) {
@@ -565,24 +573,26 @@ export function createMySqlStore(databaseUrl) {
     async listAudit({limit=100}={}) { await ensureSchema(); const [rows]=await pool.query("SELECT id,admin_id AS adminId,action,entity_type AS entityType,entity_id AS entityId,metadata_json AS metadata,created_at AS createdAt FROM admin_audit_log ORDER BY created_at DESC LIMIT ?",[limit]); return rows.map((r)=>({...r,metadata:fromJson(r.metadata,{}),createdAt:iso(r.createdAt)})); },
     async getOrderWithItems(orderId) {
       await ensureSchema();
-      const [[order]] = await pool.query("SELECT id,customer_id,buyer_email,buyer_cpf,buyer_name FROM orders WHERE id=?", [orderId]);
+      const [[order]] = await pool.query("SELECT id,customer_id,buyer_email,buyer_cpf,buyer_name,buyer_phone,buyer_birth_date,buyer_address_json FROM orders WHERE id=?", [orderId]);
       if (!order) return null;
       const [items] = await pool.query("SELECT id,course_slug,title FROM order_items WHERE order_id=? ORDER BY id", [orderId]);
-      return { id: order.id, customerId: order.customer_id, buyerEmail: order.buyer_email, buyerCpf: order.buyer_cpf, buyerName: order.buyer_name, items: items.map((item) => ({ id: item.id, courseSlug: item.course_slug, title: item.title })) };
+      return { id: order.id, customerId: order.customer_id, buyerEmail: order.buyer_email, buyerCpf: order.buyer_cpf, buyerName: order.buyer_name, buyerPhone: order.buyer_phone ?? null, buyerBirthDate: order.buyer_birth_date ?? null, buyerAddress: fromJson(order.buyer_address_json, null), items: items.map((item) => ({ id: item.id, courseSlug: item.course_slug, title: item.title })) };
     },
     // Documento, nome e contato do comprador resgatados do pedido mais recente do
     // cliente que os tenha gravados (preferência para pedido pago). É a ponte para
     // a matrícula quando o pedido reconciliado via webhook nasceu sem dados.
+    // Leva nascimento e endereço completos quando o checkout os coletou.
     async getCustomerBuyerProfile(customerId) {
       await ensureSchema();
       const [[row]] = await pool.query(
-        `SELECT buyer_email AS email, buyer_name AS fullName, buyer_cpf AS documentNumber, buyer_phone AS mobilePhone
+        `SELECT buyer_email AS email, buyer_name AS fullName, buyer_cpf AS documentNumber, buyer_phone AS mobilePhone,
+                buyer_birth_date AS birthDate, buyer_address_json AS addressJson
          FROM orders
          WHERE customer_id=? AND buyer_cpf IS NOT NULL AND buyer_cpf<>''
          ORDER BY (status='paid' OR paid_cents>0) DESC, updated_at DESC LIMIT 1`,
         [customerId],
       );
-      return row ?? null;
+      return row ? { email: row.email, fullName: row.fullName, documentNumber: row.documentNumber, mobilePhone: row.mobilePhone, birthDate: row.birthDate ?? null, address: fromJson(row.addressJson, null) } : null;
     },
     async createEnrollmentJob(job) {
       await ensureSchema();
@@ -591,7 +601,7 @@ export function createMySqlStore(databaseUrl) {
         if (existing) return null;
       }
       const value={id:id(),...job};
-      const [result]=await pool.query("INSERT IGNORE INTO enrollments (id,order_id,order_item_id,customer_id,course_slug,source_tag,status,buyer_email,buyer_cpf,buyer_name) VALUES (?,?,?,?,?,?,'queued',?,?,?)",[value.id,value.orderId ?? null,value.orderItemId ?? null,value.customerId ?? null,value.courseSlug,value.sourceTag,value.buyerEmail ?? null,value.buyerCpf ?? null,value.buyerName ?? null]);
+      const [result]=await pool.query("INSERT IGNORE INTO enrollments (id,order_id,order_item_id,customer_id,course_slug,source_tag,status,buyer_email,buyer_cpf,buyer_name,buyer_birth_date,buyer_address_json,buyer_phone) VALUES (?,?,?,?,?,?,'queued',?,?,?,?,?,?)",[value.id,value.orderId ?? null,value.orderItemId ?? null,value.customerId ?? null,value.courseSlug,value.sourceTag,value.buyerEmail ?? null,value.buyerCpf ?? null,value.buyerName ?? null,value.buyerBirthDate ?? null,value.buyerAddress ? JSON.stringify(value.buyerAddress) : null,value.buyerPhone ?? null]);
       return result.affectedRows>0 ? value.id : null;
     },
     async listPendingEnrollmentJobs() { await ensureSchema(); const [rows]=await pool.query("SELECT * FROM enrollments WHERE status='queued' ORDER BY created_at ASC"); return rows.map(enrollmentRow); },

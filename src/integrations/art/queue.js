@@ -31,6 +31,9 @@ export function createEnrollmentQueue({ store, enrollmentService, environment, l
       cpf: job.buyerCpf,
       tag: job.sourceTag,
       fullName: job.buyerName ?? "",
+      phone: job.buyerPhone ?? null,
+      birthDate: job.buyerBirthDate ?? null,
+      address: job.buyerAddress ?? null,
       onLog: (line) => { beat(); log(`${new Date().toISOString()} [enrollment:${job.id}] ${line}`); },
     });
   }
@@ -92,12 +95,18 @@ export function createEnrollmentQueue({ store, enrollmentService, environment, l
       email: order.buyerEmail ?? null,
       cpf: order.buyerCpf ?? null,
       name: order.buyerName ?? null,
+      phone: order.buyerPhone ?? null,
+      birthDate: order.buyerBirthDate ?? null,
+      address: order.buyerAddress ?? null,
     };
-    if ((!buyer.email || !buyer.cpf) && order.customerId && typeof store.getCustomerBuyerProfile === "function") {
+    if ((!buyer.email || !buyer.cpf || !buyer.phone || !buyer.birthDate || !buyer.address) && order.customerId && typeof store.getCustomerBuyerProfile === "function") {
       const profile = await store.getCustomerBuyerProfile(order.customerId);
       buyer.email ??= profile?.email ?? null;
       buyer.cpf ??= profile?.documentNumber ?? null;
       buyer.name ??= profile?.fullName ?? null;
+      buyer.phone ??= profile?.mobilePhone ?? null;
+      buyer.birthDate ??= profile?.birthDate ?? null;
+      buyer.address ??= profile?.address ?? null;
     }
     if (!buyer.email || !buyer.cpf) {
       log(`[enrollment] order ${order.id} granted access but missing buyer email/cpf — cannot auto-enroll`);
@@ -117,6 +126,9 @@ export function createEnrollmentQueue({ store, enrollmentService, environment, l
         buyerEmail: buyer.email,
         buyerCpf: buyer.cpf,
         buyerName: buyer.name,
+        buyerPhone: buyer.phone,
+        buyerBirthDate: buyer.birthDate,
+        buyerAddress: buyer.address,
       });
       if (id) created += 1;
     }
@@ -131,6 +143,9 @@ export function createEnrollmentQueue({ store, enrollmentService, environment, l
     cpf,
     fullName,
     courseSlugs,
+    phone = null,
+    birthDate = null,
+    address = null,
   }) {
     let created = 0;
     const skipped = [];
@@ -150,6 +165,9 @@ export function createEnrollmentQueue({ store, enrollmentService, environment, l
         buyerEmail: email,
         buyerCpf: cpf,
         buyerName: fullName,
+        buyerPhone: phone,
+        buyerBirthDate: birthDate,
+        buyerAddress: address,
       });
       if (!enrollmentId) {
         skipped.push({ courseSlug, reason: "already_activated" });

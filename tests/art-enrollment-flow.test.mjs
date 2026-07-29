@@ -170,6 +170,72 @@ test("enrollStudent: polling sobrevive a 401 renovando a sessao (rotacao de toke
   assert.ok(logs.some((l) => l.includes("sessao renovada apos 401")), logs.join("\n"));
 });
 
+test("enrollStudent: provisiona conta nova com os dados reais do comprador", async () => {
+  // Fase 1 (conta inexistente): o payload de provisionamento precisa nascer com
+  // telefone, nascimento e endereço REAIS do pedido — nunca defaults fabricados.
+  const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
+  let logins = 0;
+  let phase1Payload = null;
+  const dynamicTurmas = [
+    { id_turma: 4155, tag_curso: "cfp-2026_54", nome: "10 anos", ativa: 1, data_inicio_aulas: "2026-07-02" },
+  ];
+  async function handler(url, options = {}) {
+    const u = new URL(url);
+    const path = u.pathname;
+    if (path === "/api/login") {
+      logins += 1;
+      if (logins === 1) return json({ response: { status: "ERROR", message: "credenciais invalidas" } });
+      return json({ response: { status: "SUCCESS", data: { token: "rs256-real-do-aluno", id: 11833 } } });
+    }
+    if (path === "/v1/checkout/prepare") return json({ course: { tag_curso: "cfp-2026_54", nome: "Curso", valor_curso: 9997 } });
+    if (path === "/v1/services/turmas") return json({ current_page: 1, last_page: 1, data: dynamicTurmas });
+    if (path === "/v1/checkout/findStudent") return json({ error: "not found" }, 404);
+    if (path === "/v1/services/student/metrics") return json({}, 405);
+    if (path === "/v1/checkout/process/start") {
+      phase1Payload ??= JSON.parse(String(options.body ?? "{}"));
+      return json({ error: "Ops! Houve um erro inesperado" }, 500);
+    }
+    if (path === "/v1/services/aluno/findCoursesByStudent") {
+      const auth = options.headers?.Authorization ?? options.headers?.authorization ?? "";
+      if (auth !== "Bearer rs256-real-do-aluno") return json({ message: "Unauthenticated." }, 401);
+      return json([{ tag: "cfp-2026_54", status: "APPROVED", id_turma: 4155 }]);
+    }
+    return json({ error: "not found" }, 404);
+  }
+  const client = createArtClient({ pollIntervalMs: 1, pollTimeoutMs: 8000 }, handler);
+  const service = createEnrollmentService(client, { provisionTimeoutMs: 20_000 });
+
+  const result = await service.enrollStudent({
+    email: "nova.aluna@example.com",
+    cpf: "19100000000",
+    tag: "cfp-2026_54",
+    fullName: "Nova Aluna",
+    phone: "11977776666",
+    birthDate: "1992-03-15",
+    address: {
+      postCode: "01310930",
+      street: "Av Paulista",
+      number: "1000",
+      complement: "Cj 21",
+      district: "Bela Vista",
+      city: "Sao Paulo",
+      state: "SP",
+    },
+    onLog: () => {},
+  });
+
+  assert.equal(result.status, "CONFIRMED");
+  assert.ok(phase1Payload, "fase 1 enviou payload de provisionamento");
+  assert.equal(phase1Payload.phone_number, "11977776666");
+  assert.equal(phase1Payload.birth_date, "1992-03-15");
+  assert.equal(phase1Payload.street, "Av Paulista");
+  assert.equal(phase1Payload.number, "1000");
+  assert.equal(phase1Payload.district, "Bela Vista");
+  assert.equal(phase1Payload.city, "Sao Paulo");
+  assert.equal(phase1Payload.state, "SP");
+  assert.equal(phase1Payload.post_code, "01310930");
+});
+
 test("enrollStudent: alinha o documento ao perfil ja registrado na plataforma (mismatch de CPF)", async () => {
   // Caso Karine (producao 2026-07-29): conta existente com documento A no perfil
   // da plataforma, pedido PULSO com documento B. A fase 2 precisa mandar o
