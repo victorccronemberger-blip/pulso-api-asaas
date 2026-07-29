@@ -94,6 +94,17 @@ export function createAdminRouter(express, { environment, store, queue }) {
   router.get("/enrollments", requireAdmin, async (request, response) => response.json({ enrollments: await store.listEnrollmentJobs({ limit: limit(request.query.limit, 50, 100), status: request.query.status }) }));
   router.get("/enrollments/:id", requireAdmin, async (request, response) => { const enrollment = await store.getEnrollmentJob(request.params.id); if (!enrollment) return response.status(404).json({ error: "enrollment_not_found" }); response.json({ enrollment }); });
   router.post("/enrollments/:id/requeue", requireAdmin, requireCsrf, async (request, response) => { const requeued = await store.requeueEnrollmentJob(request.params.id); if (!requeued) return response.status(409).json({ error: "enrollment_not_requeueable" }); if (queue) queue.wake(); await audit(request, "enrollment.requeue", "enrollment", request.params.id); const enrollment = await store.getEnrollmentJob(request.params.id); response.json({ enrollment }); });
+  // Verificação manual imediata na plataforma: confere agora (sem esperar os 30
+  // min de polling) se a matrícula já flipou para APROVADA na ART e confirma o
+  // job quando encontra o curso na conta do aluno.
+  router.post("/enrollments/:id/verify", requireAdmin, requireCsrf, async (request, response) => {
+    if (!queue?.verifyEnrollment) return response.status(503).json({ error: "enrollment_unavailable", message: "A integração de matrículas ainda não está disponível." });
+    const outcome = await queue.verifyEnrollment(request.params.id);
+    if (!outcome) return response.status(404).json({ error: "enrollment_not_found" });
+    if (!outcome.checked) return response.status(409).json(outcome);
+    if (outcome.found) await audit(request, "enrollment.verify", "enrollment", request.params.id, { found: true });
+    return response.json(outcome);
+  });
   router.post("/course-activations", requireAdmin, requireCsrf, async (request, response) => {
     if (!queue?.enqueueManualActivation) return response.status(503).json({ error: "enrollment_unavailable", message: "A integração de matrículas ainda não está disponível." });
     let input;

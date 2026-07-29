@@ -26,9 +26,9 @@ function stubService(behavior) {
 
 const confirmed = () => ({ status: "CONFIRMED", userId: "u-1", idTurma: 4058, turmaSelection: "turma-unica", enrollment: { tag: "cpa2026" } });
 
-async function serve(context, { behavior = confirmed, maxRetries = 3, retryDelayMs = 1 } = {}) {
+async function serve(context, { behavior = confirmed, maxRetries = 3, retryDelayMs = 1, serviceOverride = null } = {}) {
   const store = createInMemoryStore();
-  const service = stubService(behavior);
+  const service = serviceOverride ?? stubService(behavior);
   const queue = createEnrollmentQueue({
     store,
     enrollmentService: service,
@@ -272,6 +272,115 @@ test("admin can list enrollments and requeue a failed job back to confirmed", as
   assert.equal(requeue.status, 200);
   await waitFor(async () => (await store.getEnrollmentJob(failed.id)).status === "confirmed");
   assert.equal((await store.getEnrollmentJob(failed.id)).status, "confirmed");
+});
+
+async function adminSession(base) {
+  await fetch(`${base}/v1/admin/bootstrap`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token: "enrollment-bootstrap-token",
+      email: "admin@pulso.test",
+      password: "long-and-unique-password",
+    }),
+  });
+  const login = await fetch(`${base}/v1/admin/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: "admin@pulso.test", password: "long-and-unique-password" }),
+  });
+  const cookies = login.headers.getSetCookie().map((value) => value.split(";")[0]).join("; ");
+  const csrf = decodeURIComponent(/pulso_admin_csrf=([^;]+)/.exec(cookies)[1]);
+  return { "content-type": "application/json", cookie: cookies, "x-csrf-token": csrf };
+}
+
+test("admin verifies a pending enrollment on the platform and confirms it", async (context) => {
+  const service = {
+    enrollStudent: async () => confirmed(),
+    listStudentCourses: async () => [{ tag: "cpa2026", id_turma: 4058 }],
+  };
+  const { base, store } = await serve(context, { serviceOverride: service });
+  const jobId = await store.createEnrollmentJob({
+    orderId: null,
+    orderItemId: null,
+    customerId: null,
+    courseSlug: "novo-cpa",
+    sourceTag: "cpa2026",
+    buyerEmail: "aluno@example.test",
+    buyerCpf: "19100000000",
+    buyerName: "Aluno Teste",
+  });
+  assert.ok(jobId);
+  await store.claimEnrollmentJob(jobId);
+  await store.finishEnrollmentJob(jobId, { status: "pending" });
+
+  const headers = await adminSession(base);
+  const verify = await fetch(`${base}/v1/admin/enrollments/${jobId}/verify`, {
+    method: "POST",
+    headers,
+    body: "{}",
+  });
+  assert.equal(verify.status, 200);
+  const outcome = await verify.json();
+  assert.deepEqual({ checked: outcome.checked, found: outcome.found }, { checked: true, found: true });
+  const job = await store.getEnrollmentJob(jobId);
+  assert.equal(job.status, "confirmed");
+  assert.equal(job.idTurma, 4058);
+  assert.equal(job.turmaSelection, "verify-manual");
+});
+
+test("admin verify leaves not-found jobs pending and refuses to double-login a running job", async (context) => {
+  const service = {
+    enrollStudent: async () => confirmed(),
+    listStudentCourses: async () => [],
+  };
+  const { base, store } = await serve(context, { serviceOverride: service });
+  const pendingId = await store.createEnrollmentJob({
+    orderId: null,
+    orderItemId: null,
+    customerId: null,
+    courseSlug: "novo-cpa",
+    sourceTag: "cpa2026",
+    buyerEmail: "aluno@example.test",
+    buyerCpf: "19100000000",
+    buyerName: "Aluno Teste",
+  });
+  await store.claimEnrollmentJob(pendingId);
+  await store.finishEnrollmentJob(pendingId, { status: "pending" });
+  const runningId = await store.createEnrollmentJob({
+    orderId: null,
+    orderItemId: null,
+    customerId: null,
+    courseSlug: "ancord-2026",
+    sourceTag: "ancord-2026",
+    buyerEmail: "aluno@example.test",
+    buyerCpf: "19100000000",
+    buyerName: "Aluno Teste",
+  });
+  await store.claimEnrollmentJob(runningId);
+
+  const headers = await adminSession(base);
+  const notFound = await fetch(`${base}/v1/admin/enrollments/${pendingId}/verify`, {
+    method: "POST",
+    headers,
+    body: "{}",
+  });
+  assert.equal(notFound.status, 200);
+  assert.deepEqual(await notFound.json(), {
+    checked: true,
+    found: false,
+    knownCourses: 0,
+    enrollment: await store.getEnrollmentJob(pendingId),
+  });
+  assert.equal((await store.getEnrollmentJob(pendingId)).status, "pending");
+
+  const busy = await fetch(`${base}/v1/admin/enrollments/${runningId}/verify`, {
+    method: "POST",
+    headers,
+    body: "{}",
+  });
+  assert.equal(busy.status, 409);
+  assert.equal((await busy.json()).reason, "job_in_progress");
 });
 
 test("admin activates selected courses for one registered customer without duplicates", async (context) => {

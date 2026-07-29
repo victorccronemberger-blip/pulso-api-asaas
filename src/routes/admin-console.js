@@ -90,7 +90,7 @@ const PAGE_HTML = `<!doctype html>
     <div class="card">
       <h1 style="font-size:16px">Ativacoes recentes</h1>
       <table>
-        <thead><tr><th>Curso</th><th>Email</th><th>Turma</th><th>Status</th><th>Quando</th></tr></thead>
+        <thead><tr><th>Curso</th><th>Email</th><th>Turma</th><th>Status</th><th>Quando</th><th></th></tr></thead>
         <tbody id="recent"></tbody>
       </table>
     </div>
@@ -185,14 +185,32 @@ function loadRecent() {
     items.forEach(function (e) {
       var tr = document.createElement("tr");
       var when = e.createdAt ? new Date(e.createdAt).toLocaleString("pt-BR") : "-";
+      var canVerify = ["pending", "failed", "not_created", "confirmed"].indexOf(e.status) >= 0;
       tr.innerHTML =
         "<td>" + esc(e.courseSlug) + "</td>" +
         "<td>" + esc(e.buyerEmail) + "</td>" +
         "<td>" + esc(e.idTurma || "-") + "</td>" +
         '<td><span class="pill ' + esc(e.status) + '">' + esc(e.status) + "</span></td>" +
-        "<td class='muted'>" + esc(when) + "</td>";
+        "<td class='muted'>" + esc(when) + "</td>" +
+        (canVerify ? '<td><button class="secondary" style="margin:0;padding:6px 10px" data-verify="' + esc(e.id) + '">verificar</button></td>' : "<td></td>");
       tb.appendChild(tr);
     });
+    Array.prototype.forEach.call(tb.querySelectorAll("[data-verify]"), function (btn) {
+      btn.addEventListener("click", function () { verifyJob(btn.getAttribute("data-verify")); });
+    });
+  });
+}
+function verifyJob(id) {
+  api("/v1/admin/enrollments/" + id + "/verify", { method: "POST", body: "{}" }).then(function (res) {
+    if (res.body && res.body.checked && res.body.found) {
+      show($("status"), "ok", "MATRICULA CONFIRMADA na plataforma (job " + id.slice(0, 8) + ").");
+    } else if (res.body && res.body.checked) {
+      show($("status"), "wait", "Ainda NAO consta na plataforma (job " + id.slice(0, 8) + "). O flip assincrono pode levar horas; verifique novamente mais tarde.");
+    } else {
+      show($("status"), "err", "Verificacao nao executada: " + ((res.body && (res.body.message || res.body.reason || res.body.error)) || ("HTTP " + res.status)));
+    }
+    loadRecent();
+    loadCustomers();
   });
 }
 function pollJob(id, attempts) {

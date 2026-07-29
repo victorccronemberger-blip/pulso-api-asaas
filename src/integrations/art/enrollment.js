@@ -195,7 +195,7 @@ export function createEnrollmentService(artClient, config = {}) {
     const turma = await refineTurmaDinamica({ tag, turmaProvisao, xApiKey, carrierToken, rs256: session.token, onLog });
     const idTurma = turma.idTurma;
     const resolvedFinancialInstitution = financialInstitution || (turma.requiresFinancialInstitution ? "998" : "");
-    onLog(`[enroll] inicio email=${email} tag=${tag} turma=${idTurma} (${turma.selectionReason})`);
+    onLog(`[enroll] inicio email=${email} tag=${tag} turma=${idTurma} (${turma.selectionReason}) fi=${resolvedFinancialInstitution || "-"}`);
 
     await artClient.syncStudentProfile({ xApiKey, token: session.token });
     await sleep(2000);

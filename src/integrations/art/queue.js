@@ -151,6 +151,39 @@ export function createEnrollmentQueue({ store, enrollmentService, environment, l
     return { created, skipped, enrollmentIds };
   }
 
+  // Verificação manual para jobs PARADOS (pending/failed/not_created/confirmed).
+  // Nunca roda em job queued/processing: um segundo login da mesma conta
+  // revogaria o token RS256 do polling em andamento (lição #1 do fluxo validado).
+  async function verifyEnrollment(enrollmentId) {
+    const job = await store.getEnrollmentJob(enrollmentId);
+    if (!job) return null;
+    if (["queued", "processing"].includes(job.status)) {
+      return { checked: false, reason: "job_in_progress", enrollment: job };
+    }
+    if (!job.buyerEmail || !job.buyerCpf) {
+      return { checked: false, reason: "missing_buyer_data", enrollment: job };
+    }
+    let courses;
+    try {
+      courses = await enrollmentService.listStudentCourses({ email: job.buyerEmail, cpf: job.buyerCpf });
+    } catch (error) {
+      return { checked: false, reason: String(error).slice(0, 300), enrollment: job };
+    }
+    const hit = Array.isArray(courses) ? courses.find((course) => course?.tag === job.sourceTag) : null;
+    if (!hit) {
+      return { checked: true, found: false, knownCourses: Array.isArray(courses) ? courses.length : 0, enrollment: job };
+    }
+    const idTurma = Number(hit.id_turma ?? hit.turma ?? hit.idTurma) || null;
+    await store.finishEnrollmentJob(job.id, {
+      status: "confirmed",
+      idTurma: idTurma ?? job.idTurma ?? null,
+      turmaSelection: job.turmaSelection ?? "verify-manual",
+      userId: job.userId ?? null,
+      result: { verifiedBy: "admin", enrollment: hit },
+    });
+    return { checked: true, found: true, enrollment: await store.getEnrollmentJob(job.id) };
+  }
+
   async function start() {
     const recovered = await store.recoverStaleEnrollments();
     if (recovered) log(`[enrollment] recovered ${recovered} stale job(s) from previous run`);
@@ -171,6 +204,7 @@ export function createEnrollmentQueue({ store, enrollmentService, environment, l
   return Object.freeze({
     enqueueOrder,
     enqueueManualActivation,
+    verifyEnrollment,
     start,
     shutdown,
     status,
