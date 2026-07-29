@@ -19,7 +19,7 @@ const paymentInstallment = (row) => row && ({
   paymentUrl: row.payment_url,
   paidAt: iso(row.paid_at),
 });
-const enrollmentRow = (row) => row && ({ id: row.id, orderId: row.order_id, orderItemId: row.order_item_id, courseSlug: row.course_slug, sourceTag: row.source_tag, status: row.status, attempts: Number(row.attempts), idTurma: row.id_turma, turmaSelection: row.turma_selection, userId: row.user_id, result: fromJson(row.result_json, null), error: row.error, buyerEmail: row.buyer_email, buyerCpf: row.buyer_cpf, buyerName: row.buyer_name, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) });
+const enrollmentRow = (row) => row && ({ id: row.id, orderId: row.order_id, orderItemId: row.order_item_id, customerId: row.customer_id, courseSlug: row.course_slug, sourceTag: row.source_tag, status: row.status, attempts: Number(row.attempts), idTurma: row.id_turma, turmaSelection: row.turma_selection, userId: row.user_id, result: fromJson(row.result_json, null), error: row.error, buyerEmail: row.buyer_email, buyerCpf: row.buyer_cpf, buyerName: row.buyer_name, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) });
 
 export function createMySqlStore(databaseUrl) {
   const pool = mysql.createPool({ uri: databaseUrl, timezone: "Z", dateStrings: true });
@@ -43,7 +43,7 @@ export function createMySqlStore(databaseUrl) {
         `CREATE TABLE IF NOT EXISTS webhook_events (event_id VARCHAR(128) PRIMARY KEY, received_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3))`,
         `CREATE TABLE IF NOT EXISTS admin_audit_log (id CHAR(36) PRIMARY KEY, admin_id CHAR(36) NULL, action VARCHAR(80) NOT NULL, entity_type VARCHAR(80) NOT NULL, entity_id VARCHAR(80) NULL, metadata_json JSON NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), INDEX audit_created (created_at))`,
         `CREATE TABLE IF NOT EXISTS app_settings (setting_key VARCHAR(64) PRIMARY KEY, setting_value JSON NOT NULL, updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3))`,
-        `CREATE TABLE IF NOT EXISTS enrollments (id CHAR(36) PRIMARY KEY, order_id CHAR(36) NOT NULL, order_item_id BIGINT UNSIGNED NULL, course_slug VARCHAR(80) NOT NULL, source_tag VARCHAR(80) NOT NULL, status VARCHAR(24) NOT NULL DEFAULT 'queued', attempts INT UNSIGNED NOT NULL DEFAULT 0, id_turma INT NULL, turma_selection VARCHAR(40) NULL, user_id VARCHAR(80) NULL, result_json JSON NULL, error VARCHAR(512) NULL, buyer_email VARCHAR(160) NULL, buyer_cpf VARCHAR(14) NULL, buyer_name VARCHAR(180) NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3), UNIQUE INDEX enrollments_order_course (order_id, course_slug), INDEX enrollments_status (status, created_at), CONSTRAINT enrollments_order_fk FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE)`,
+        `CREATE TABLE IF NOT EXISTS enrollments (id CHAR(36) PRIMARY KEY, order_id CHAR(36) NULL, order_item_id BIGINT UNSIGNED NULL, customer_id CHAR(36) NULL, course_slug VARCHAR(80) NOT NULL, source_tag VARCHAR(80) NOT NULL, status VARCHAR(24) NOT NULL DEFAULT 'queued', attempts INT UNSIGNED NOT NULL DEFAULT 0, id_turma INT NULL, turma_selection VARCHAR(40) NULL, user_id VARCHAR(80) NULL, result_json JSON NULL, error VARCHAR(512) NULL, buyer_email VARCHAR(160) NULL, buyer_cpf VARCHAR(14) NULL, buyer_name VARCHAR(180) NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3), UNIQUE INDEX enrollments_order_course (order_id, course_slug), INDEX enrollments_customer_course (customer_id, course_slug), INDEX enrollments_status (status, created_at), CONSTRAINT enrollments_order_fk FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE)`,
       ];
       for (const sql of statements) await pool.query(sql);
       const [customerColumns] = await pool.query("SHOW COLUMNS FROM customers");
@@ -101,6 +101,14 @@ export function createMySqlStore(databaseUrl) {
       await pool.query(
         "INSERT IGNORE INTO app_settings (setting_key, setting_value) VALUES ('campaign', JSON_OBJECT('activeCouponCode', NULL, 'headline', NULL))",
       );
+      const [enrollmentColumns] = await pool.query("SHOW COLUMNS FROM enrollments");
+      const enrollmentColumnNames = new Set(enrollmentColumns.map((column) => column.Field));
+      const orderIdColumn = enrollmentColumns.find((column) => column.Field === "order_id");
+      if (orderIdColumn?.Null === "NO") await pool.query("ALTER TABLE enrollments MODIFY order_id CHAR(36) NULL");
+      if (!enrollmentColumnNames.has("customer_id")) await pool.query("ALTER TABLE enrollments ADD COLUMN customer_id CHAR(36) NULL AFTER order_item_id");
+      await pool.query("UPDATE enrollments e JOIN orders o ON o.id=e.order_id SET e.customer_id=o.customer_id WHERE e.customer_id IS NULL AND o.customer_id IS NOT NULL");
+      const [enrollmentCustomerIndexes] = await pool.query("SHOW INDEX FROM enrollments WHERE Key_name='enrollments_customer_course'");
+      if (!enrollmentCustomerIndexes.length) await pool.query("ALTER TABLE enrollments ADD INDEX enrollments_customer_course (customer_id, course_slug)");
     })();
     return ready;
   }
@@ -158,6 +166,23 @@ export function createMySqlStore(databaseUrl) {
     async getSession(tokenHash) { await ensureSchema(); const [[row]] = await pool.query("SELECT s.id,s.admin_id AS adminId,s.csrf_hash AS csrfHash,s.expires_at AS expiresAt,a.email FROM admin_sessions s JOIN administrators a ON a.id=s.admin_id WHERE s.token_hash=? AND s.expires_at > NOW(3)", [tokenHash]); return row ? { ...row, expiresAt: +new Date(row.expiresAt), admin: { id: row.adminId, email: row.email } } : null; },
     async revokeSession(tokenHash) { await ensureSchema(); await pool.query("DELETE FROM admin_sessions WHERE token_hash=?", [tokenHash]); },
     async getCustomerByEmail(email) { await ensureSchema(); const [[row]] = await pool.query("SELECT id,email,display_name AS displayName,mobile_phone AS mobilePhone,document_last4 AS documentLast4,email_verified_at AS emailVerifiedAt,password_salt AS passwordSalt,password_hash AS passwordHash,created_at AS createdAt FROM customers WHERE email=?", [email]); return row ? { ...row, emailVerifiedAt:iso(row.emailVerifiedAt), createdAt: iso(row.createdAt) } : null; },
+    async getCustomerById(customerId) { await ensureSchema(); const [[row]] = await pool.query("SELECT id,email,display_name AS displayName,mobile_phone AS mobilePhone,document_last4 AS documentLast4,email_verified_at AS emailVerifiedAt,created_at AS createdAt FROM customers WHERE id=?", [customerId]); return row ? { ...row, emailVerifiedAt:iso(row.emailVerifiedAt), createdAt:iso(row.createdAt) } : null; },
+    async listCustomers({limit=100}={}) {
+      await ensureSchema();
+      const [rows]=await pool.query(
+        `SELECT c.id,c.email,c.display_name AS displayName,c.mobile_phone AS mobilePhone,
+         c.document_last4 AS documentLast4,c.email_verified_at AS emailVerifiedAt,c.created_at AS createdAt,
+         (SELECT COUNT(*) FROM enrollments e WHERE e.customer_id=c.id AND e.status='confirmed') AS activationCount
+         FROM customers c ORDER BY c.created_at DESC LIMIT ?`,
+        [limit],
+      );
+      return rows.map((row)=>({
+        ...row,
+        emailVerifiedAt:iso(row.emailVerifiedAt),
+        createdAt:iso(row.createdAt),
+        activationCount:Number(row.activationCount),
+      }));
+    },
     async createCustomer(customer) { await ensureSchema(); const value={id:id(),...customer}; await pool.query("INSERT INTO customers (id,email,display_name,password_salt,password_hash) VALUES (?,?,?,?,?)",[value.id,value.email,value.displayName,value.passwordSalt,value.passwordHash]); return { ...value, mobilePhone:null, documentLast4:null, emailVerifiedAt:null, createdAt:new Date().toISOString() }; },
     async updateCustomerProfile(customerId, profile) { await ensureSchema(); await pool.query("UPDATE customers SET display_name=COALESCE(?,display_name),mobile_phone=?,document_last4=COALESCE(?,document_last4) WHERE id=?",[profile.displayName ?? null,profile.mobilePhone ?? null,profile.documentLast4 ?? null,customerId]); const [[row]]=await pool.query("SELECT id,email,display_name AS displayName,mobile_phone AS mobilePhone,document_last4 AS documentLast4,email_verified_at AS emailVerifiedAt,created_at AS createdAt FROM customers WHERE id=?",[customerId]); return row ? { ...row,emailVerifiedAt:iso(row.emailVerifiedAt),createdAt:iso(row.createdAt) } : null; },
     async updateCustomerPassword(customerId, credentials) { await ensureSchema(); const [result]=await pool.query("UPDATE customers SET password_salt=?,password_hash=? WHERE id=?",[credentials.passwordSalt,credentials.passwordHash,customerId]); return result.affectedRows>0; },
@@ -540,12 +565,21 @@ export function createMySqlStore(databaseUrl) {
     async listAudit({limit=100}={}) { await ensureSchema(); const [rows]=await pool.query("SELECT id,admin_id AS adminId,action,entity_type AS entityType,entity_id AS entityId,metadata_json AS metadata,created_at AS createdAt FROM admin_audit_log ORDER BY created_at DESC LIMIT ?",[limit]); return rows.map((r)=>({...r,metadata:fromJson(r.metadata,{}),createdAt:iso(r.createdAt)})); },
     async getOrderWithItems(orderId) {
       await ensureSchema();
-      const [[order]] = await pool.query("SELECT id,buyer_email,buyer_cpf,buyer_name FROM orders WHERE id=?", [orderId]);
+      const [[order]] = await pool.query("SELECT id,customer_id,buyer_email,buyer_cpf,buyer_name FROM orders WHERE id=?", [orderId]);
       if (!order) return null;
       const [items] = await pool.query("SELECT id,course_slug,title FROM order_items WHERE order_id=? ORDER BY id", [orderId]);
-      return { id: order.id, buyerEmail: order.buyer_email, buyerCpf: order.buyer_cpf, buyerName: order.buyer_name, items: items.map((item) => ({ id: item.id, courseSlug: item.course_slug, title: item.title })) };
+      return { id: order.id, customerId: order.customer_id, buyerEmail: order.buyer_email, buyerCpf: order.buyer_cpf, buyerName: order.buyer_name, items: items.map((item) => ({ id: item.id, courseSlug: item.course_slug, title: item.title })) };
     },
-    async createEnrollmentJob(job) { await ensureSchema(); const value={id:id(),...job}; const [result]=await pool.query("INSERT IGNORE INTO enrollments (id,order_id,order_item_id,course_slug,source_tag,status,buyer_email,buyer_cpf,buyer_name) VALUES (?,?,?,?,?,'queued',?,?,?)",[value.id,value.orderId,value.orderItemId ?? null,value.courseSlug,value.sourceTag,value.buyerEmail ?? null,value.buyerCpf ?? null,value.buyerName ?? null]); return result.affectedRows>0 ? value.id : null; },
+    async createEnrollmentJob(job) {
+      await ensureSchema();
+      if (job.customerId) {
+        const [[existing]]=await pool.query("SELECT id FROM enrollments WHERE customer_id=? AND course_slug=? AND status NOT IN ('failed','not_created') LIMIT 1",[job.customerId,job.courseSlug]);
+        if (existing) return null;
+      }
+      const value={id:id(),...job};
+      const [result]=await pool.query("INSERT IGNORE INTO enrollments (id,order_id,order_item_id,customer_id,course_slug,source_tag,status,buyer_email,buyer_cpf,buyer_name) VALUES (?,?,?,?,?,?,'queued',?,?,?)",[value.id,value.orderId ?? null,value.orderItemId ?? null,value.customerId ?? null,value.courseSlug,value.sourceTag,value.buyerEmail ?? null,value.buyerCpf ?? null,value.buyerName ?? null]);
+      return result.affectedRows>0 ? value.id : null;
+    },
     async listPendingEnrollmentJobs() { await ensureSchema(); const [rows]=await pool.query("SELECT * FROM enrollments WHERE status='queued' ORDER BY created_at ASC"); return rows.map(enrollmentRow); },
     async claimEnrollmentJob(enrollmentId) { await ensureSchema(); const [result]=await pool.query("UPDATE enrollments SET status='processing', attempts=attempts+1 WHERE id=? AND status='queued'",[enrollmentId]); return result.affectedRows>0; },
     async finishEnrollmentJob(enrollmentId, patch) { await ensureSchema(); await pool.query("UPDATE enrollments SET status=?, id_turma=?, turma_selection=?, user_id=?, result_json=?, error=? WHERE id=?",[patch.status,patch.idTurma ?? null,patch.turmaSelection ?? null,patch.userId ?? null,JSON.stringify(patch.result ?? null),patch.error ?? null,enrollmentId]); },

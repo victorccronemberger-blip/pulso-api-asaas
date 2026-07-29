@@ -3,11 +3,30 @@ import { validateCampaign, validateCoupon, validateCredentials } from "../admin/
 import { createAuthoritativeQuote, CheckoutValidationError } from "../domain/quote.js";
 import { adminCatalog } from "../domain/catalog.js";
 import { normalizeCouponCode } from "../domain/coupons.js";
+import { normalizeBrazilianTaxId } from "../domain/brazilian-tax-id.js";
 import { createFixedWindowLimiter } from "../http/fixed-window-limiter.js";
 
 const SESSION_COOKIE = "__Host-pulso_admin";
 const CSRF_COOKIE = "pulso_admin_csrf";
 const limit = (input, fallback, max) => Math.max(1, Math.min(max, Number(input) || fallback));
+const customerIdPattern = /^[0-9a-f-]{36}$/i;
+
+function activationInput(body) {
+  const customerId = String(body?.customerId ?? "").trim();
+  const fullName = String(body?.fullName ?? "").trim().replace(/\s+/g, " ");
+  const documentNumber = normalizeBrazilianTaxId(body?.documentNumber);
+  const courseSlugs = Array.isArray(body?.courseSlugs)
+    ? [...new Set(body.courseSlugs.map((slug) => String(slug).trim()))]
+    : [];
+  const catalogSlugs = new Set(adminCatalog.map((product) => product.slug));
+  if (!customerIdPattern.test(customerId)) throw new Error("Selecione um cliente vÃ¡lido.");
+  if (fullName.length < 3 || fullName.length > 180) throw new Error("Informe o nome completo do aluno.");
+  if (!documentNumber) throw new Error("Informe um CPF ou CNPJ vÃ¡lido.");
+  if (!courseSlugs.length || courseSlugs.length > adminCatalog.length || courseSlugs.some((slug) => !catalogSlugs.has(slug))) {
+    throw new Error("Selecione ao menos um curso ativo do catÃ¡logo.");
+  }
+  return { customerId, fullName, documentNumber, courseSlugs };
+}
 
 function cookies(response, session, csrf, maxAge) {
   response.append("Set-Cookie", serializeCookie(SESSION_COOKIE, session, { httpOnly: true, maxAge }));
@@ -66,10 +85,47 @@ export function createAdminRouter(express, { environment, store, queue }) {
   router.get("/overview", requireAdmin, async (_request, response) => response.json(await store.overview()));
   router.get("/finance", requireAdmin, async (_request, response) => response.json({ series: await store.finance() }));
   router.get("/orders", requireAdmin, async (request, response) => response.json({ orders: await store.listOrders({ limit: limit(request.query.limit, 50, 100), status: request.query.status }) }));
+  router.get("/customers", requireAdmin, async (request, response) => response.json({ customers: await store.listCustomers({ limit: limit(request.query.limit, 100, 200) }) }));
   router.get("/audit", requireAdmin, async (request, response) => response.json({ events: await store.listAudit({ limit: limit(request.query.limit, 100, 200) }) }));
   router.get("/enrollments", requireAdmin, async (request, response) => response.json({ enrollments: await store.listEnrollmentJobs({ limit: limit(request.query.limit, 50, 100), status: request.query.status }) }));
   router.get("/enrollments/:id", requireAdmin, async (request, response) => { const enrollment = await store.getEnrollmentJob(request.params.id); if (!enrollment) return response.status(404).json({ error: "enrollment_not_found" }); response.json({ enrollment }); });
   router.post("/enrollments/:id/requeue", requireAdmin, requireCsrf, async (request, response) => { const requeued = await store.requeueEnrollmentJob(request.params.id); if (!requeued) return response.status(409).json({ error: "enrollment_not_requeueable" }); if (queue) queue.wake(); await audit(request, "enrollment.requeue", "enrollment", request.params.id); const enrollment = await store.getEnrollmentJob(request.params.id); response.json({ enrollment }); });
+  router.post("/course-activations", requireAdmin, requireCsrf, async (request, response) => {
+    if (!queue?.enqueueManualActivation) return response.status(503).json({ error: "enrollment_unavailable", message: "A integraÃ§Ã£o de matrÃ­culas ainda nÃ£o estÃ¡ disponÃ­vel." });
+    let input;
+    try {
+      input = activationInput(request.body);
+    } catch (error) {
+      return response.status(400).json({ error: "invalid_activation", message: error.message });
+    }
+    const customer = await store.getCustomerById(input.customerId);
+    if (!customer) return response.status(404).json({ error: "customer_not_found", message: "Cliente nÃ£o encontrado." });
+    const activation = await queue.enqueueManualActivation({
+      customerId: customer.id,
+      email: customer.email,
+      cpf: input.documentNumber,
+      fullName: input.fullName,
+      courseSlugs: input.courseSlugs,
+    });
+    if (!activation.created) {
+      return response.status(409).json({
+        error: "courses_already_activated",
+        message: "Os cursos selecionados jÃ¡ possuem uma ativaÃ§Ã£o em andamento ou concluÃ­da para este cliente.",
+        activation,
+      });
+    }
+    await audit(request, "course_activation.create", "customer", customer.id, {
+      courseSlugs: input.courseSlugs,
+      enrollmentIds: activation.enrollmentIds,
+      skipped: activation.skipped,
+    });
+    return response.status(201).json({
+      activation: {
+        ...activation,
+        customer: { id: customer.id, email: customer.email, displayName: customer.displayName },
+      },
+    });
+  });
   return router;
 }
 

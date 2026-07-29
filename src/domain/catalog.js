@@ -14,6 +14,7 @@ export const adminCatalog = Object.freeze(products.map((product) => Object.freez
   priceCents: product.priceCents,
   officialPriceCents: product.officialPriceCents,
   cohort: product.cohort ?? null,
+  sourceTag: product.sourceTag,
 })));
 
 export function getCheckoutProduct(slug) {

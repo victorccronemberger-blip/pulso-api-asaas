@@ -174,3 +174,76 @@ test("admin can list enrollments and requeue a failed job back to confirmed", as
   await waitFor(async () => (await store.getEnrollmentJob(failed.id)).status === "confirmed");
   assert.equal((await store.getEnrollmentJob(failed.id)).status, "confirmed");
 });
+
+test("admin activates selected courses for one registered customer without duplicates", async (context) => {
+  const { base, store, service } = await serve(context);
+  const customer = await store.createCustomer({
+    email: "cliente.ativacao@example.test",
+    displayName: "Cliente Ativacao",
+    passwordSalt: "salt",
+    passwordHash: "hash",
+  });
+
+  await fetch(`${base}/v1/admin/bootstrap`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token: "enrollment-bootstrap-token",
+      email: "admin@pulso.test",
+      password: "long-and-unique-password",
+    }),
+  });
+  const login = await fetch(`${base}/v1/admin/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      email: "admin@pulso.test",
+      password: "long-and-unique-password",
+    }),
+  });
+  const cookies = login.headers.getSetCookie().map((value) => value.split(";")[0]).join("; ");
+  const csrf = decodeURIComponent(/pulso_admin_csrf=([^;]+)/.exec(cookies)[1]);
+  const adminHeaders = {
+    "content-type": "application/json",
+    cookie: cookies,
+    "x-csrf-token": csrf,
+  };
+
+  const customers = await fetch(`${base}/v1/admin/customers`, { headers: { cookie: cookies } });
+  assert.equal(customers.status, 200);
+  assert.equal((await customers.json()).customers[0].id, customer.id);
+
+  const activationBody = {
+    customerId: customer.id,
+    fullName: "Cliente Ativacao",
+    documentNumber: "19100000000",
+    courseSlugs: ["novo-cpa", "ancord-2026"],
+  };
+  const activation = await fetch(`${base}/v1/admin/course-activations`, {
+    method: "POST",
+    headers: adminHeaders,
+    body: JSON.stringify(activationBody),
+  });
+  assert.equal(activation.status, 201);
+  const activationResult = await activation.json();
+  assert.equal(activationResult.activation.created, 2);
+  assert.equal(activationResult.activation.customer.email, customer.email);
+
+  await waitFor(async () => {
+    const jobs = await store.listEnrollmentJobs({ limit: 10 });
+    return jobs.length === 2 && jobs.every((job) => job.status === "confirmed");
+  });
+  assert.deepEqual(
+    service.calls.map((call) => call.tag).sort(),
+    ["ancord-2026", "cpa2026"],
+  );
+
+  const duplicate = await fetch(`${base}/v1/admin/course-activations`, {
+    method: "POST",
+    headers: adminHeaders,
+    body: JSON.stringify(activationBody),
+  });
+  assert.equal(duplicate.status, 409);
+  assert.equal((await duplicate.json()).error, "courses_already_activated");
+  assert.equal(service.calls.length, 2);
+});

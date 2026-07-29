@@ -86,6 +86,7 @@ export function createEnrollmentQueue({ store, enrollmentService, environment, l
       const id = await store.createEnrollmentJob({
         orderId: order.id,
         orderItemId: item.id ?? null,
+        customerId: order.customerId ?? null,
         courseSlug: item.courseSlug,
         sourceTag,
         buyerEmail: order.buyerEmail,
@@ -97,6 +98,43 @@ export function createEnrollmentQueue({ store, enrollmentService, environment, l
     if (skipped.length) log(`[enrollment] order ${order.id} skipped slugs without ART tag: ${skipped.join(", ")}`);
     if (created) wake();
     return { created, skipped };
+  }
+
+  async function enqueueManualActivation({
+    customerId,
+    email,
+    cpf,
+    fullName,
+    courseSlugs,
+  }) {
+    let created = 0;
+    const skipped = [];
+    const enrollmentIds = [];
+    for (const courseSlug of courseSlugs) {
+      const sourceTag = getSourceTag(courseSlug);
+      if (!sourceTag) {
+        skipped.push({ courseSlug, reason: "course_not_mapped" });
+        continue;
+      }
+      const enrollmentId = await store.createEnrollmentJob({
+        orderId: null,
+        orderItemId: null,
+        customerId,
+        courseSlug,
+        sourceTag,
+        buyerEmail: email,
+        buyerCpf: cpf,
+        buyerName: fullName,
+      });
+      if (!enrollmentId) {
+        skipped.push({ courseSlug, reason: "already_activated" });
+        continue;
+      }
+      enrollmentIds.push(enrollmentId);
+      created += 1;
+    }
+    if (created) wake();
+    return { created, skipped, enrollmentIds };
   }
 
   async function start() {
@@ -116,5 +154,12 @@ export function createEnrollmentQueue({ store, enrollmentService, environment, l
     return { enabled: true, draining, shuttingDown, runningJobId };
   }
 
-  return Object.freeze({ enqueueOrder, start, shutdown, status, wake });
+  return Object.freeze({
+    enqueueOrder,
+    enqueueManualActivation,
+    start,
+    shutdown,
+    status,
+    wake,
+  });
 }
