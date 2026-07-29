@@ -127,8 +127,8 @@
     "accent": "#C00021",
     "cohort": "4103",
     "year": "2026",
-    "officialPriceCents": 200000,
-    "priceCents": 100000,
+    "officialPriceCents": 600000,
+    "priceCents": 300000,
     "featured": true,
     "keywords": [
       "cfg",
@@ -185,8 +185,8 @@
     "accent": "#407BA7",
     "cohort": "4111",
     "year": "2026",
-    "officialPriceCents": 200000,
-    "priceCents": 100000,
+    "officialPriceCents": 400000,
+    "priceCents": 200000,
     "featured": true,
     "keywords": [
       "cga",
