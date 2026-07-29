@@ -101,7 +101,7 @@ export function createAdminRouter(express, { environment, store, queue }) {
     if (!queue?.verifyEnrollment) return response.status(503).json({ error: "enrollment_unavailable", message: "A integração de matrículas ainda não está disponível." });
     const outcome = await queue.verifyEnrollment(request.params.id);
     if (!outcome) return response.status(404).json({ error: "enrollment_not_found" });
-    if (!outcome.checked) return response.status(409).json(outcome);
+    if (!outcome.checked) return response.status(409).json({ error: "verify_not_run", message: "A verificação não pode rodar agora (matrícula em andamento ou dados do comprador ausentes). Aguarde o job terminar.", ...outcome });
     if (outcome.found) await audit(request, "enrollment.verify", "enrollment", request.params.id, { found: true });
     return response.json(outcome);
   });
