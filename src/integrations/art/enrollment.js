@@ -575,10 +575,53 @@ export function createEnrollmentService(artClient, config = {}) {
   // Cancela a matrícula de um aluno na plataforma ART: localiza as orders da tag
   // via findCoursesByStudent e deleta cada uma (soft-delete, body "1"). Retorna
   // { deleted: number, tags: string[] } com o que foi removido.
+  //
+  // O CPF do pedido Pulso pode DIVERGIR do CPF registrado na plataforma (caso
+  // real: conta criada com um CPF, pedido posterior com outro). A senha da ART
+  // é o CPF da plataforma, então o login com o CPF do pedido falha. Quando isso
+  // acontece, resolve o CPF real via findStudent (com service account) e retenta.
   async function cancelStudentCourse({ email, cpf, tag, onLog = () => {} }) {
     const xApiKey = generateXApiKey();
-    onLog(`[cancel] login ${email}`);
-    const session = await artClient.login(email, cpf);
+    const digitsOnly = (value) => String(value ?? "").replace(/\D/g, "") || null;
+
+    let session = null;
+    let loginError = null;
+    try {
+      onLog(`[cancel] login ${email}`);
+      session = await artClient.login(email, cpf);
+    } catch (error) {
+      loginError = error;
+    }
+
+    // Login com o CPF do pedido falhou — resolve o CPF real da plataforma.
+    if (!session) {
+      let platformCpf = null;
+      for (const account of serviceAccounts) {
+        try {
+          const svcSession = await artClient.login(account.email, account.password);
+          const found = await artClient.findStudent({ email, xApiKey, token: svcSession.token });
+          if (found.status === 200 && found.body && typeof found.body === "object") {
+            platformCpf = digitsOnly(found.body.documento);
+            if (platformCpf) {
+              onLog(`[cancel] CPF do pedido ...${String(cpf).slice(-4)} diverge da plataforma ...${platformCpf.slice(-4)} — usando o da plataforma`);
+              break;
+            }
+          }
+        } catch { /* service account indisponível — tenta o próximo */ }
+      }
+      if (platformCpf && platformCpf !== digitsOnly(cpf)) {
+        try {
+          onLog(`[cancel] re-login com CPF da plataforma`);
+          session = await artClient.login(email, platformCpf);
+        } catch (retryError) {
+          loginError = retryError;
+        }
+      }
+    }
+    if (!session) {
+      throw new Error(`login ART falhou para ${email}: ${String(loginError).slice(0, 200)}`);
+    }
+
     const { status, body } = await artClient.findCoursesByStudent({ email, xApiKey, token: session.token });
     if (status !== 200 || !Array.isArray(body)) {
       throw new Error(`findCoursesByStudent HTTP ${status}: ${String(body).slice(0, 300)}`);

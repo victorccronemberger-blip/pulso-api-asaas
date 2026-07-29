@@ -328,6 +328,7 @@ export function createCheckoutRouter(express, {
       environment: environment.asaasEnvironment,
       methods: environment.checkoutEnabled ? ["pix", "pix_installment", "credit_card"] : [],
       cardMode: "hosted_invoice",
+      cardInstallmentMaximum: MAX_INTEREST_FREE_INSTALLMENTS,
       pixInstallmentMode: "monthly_manual_payment",
       pixInstallmentMaximum: MAX_PIX_INSTALLMENTS,
       pixAutomatic: false,
