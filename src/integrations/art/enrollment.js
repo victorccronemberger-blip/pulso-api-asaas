@@ -172,6 +172,75 @@ export function createEnrollmentService(artClient, config = {}) {
   // no payload quando a conta é provisionada por nós (fase 1) e como fallback
   // quando o perfil da plataforma está vazio — nunca mais "Rua Test"/"11999999999"
   // poluindo o cadastro de um cliente real.
+  // Orders PENDING ficam invisíveis no findCoursesByStudent — a resposta do
+  // findOrdersByStudent tem formato imprevisível (dict aninhado ou lista), então
+  // a varredura é profunda e defensiva.
+  function collectPendingOrders(value, out = []) {
+    if (!value || typeof value !== "object") return out;
+    if (Array.isArray(value)) {
+      for (const item of value) collectPendingOrders(item, out);
+      return out;
+    }
+    if (value.id_order && String(value.status ?? "").toUpperCase() === "PENDING") out.push(value);
+    for (const item of Object.values(value)) collectPendingOrders(item, out);
+    return out;
+  }
+
+  // Só deleta order que casa FORTEMENTE com a tag/turma do job (id_turma igual
+  // ou tag explícita igual). Ambiguidade => não toca em nada (nunca apagar a
+  // order PENDING de OUTRO curso do mesmo aluno). Máximo 3 por segurança.
+  async function recoverStuckPendingOrder({ tag, idTurma, email, idUsuario, payload, xApiKey, getToken, relogin, onLog }) {
+    if (!idUsuario) return null;
+    let listed;
+    try {
+      listed = await artClient.findOrdersByStudent({ idUsuario, xApiKey, token: getToken() });
+    } catch {
+      return null;
+    }
+    if (listed.status !== 200) {
+      onLog(`[enroll] recovery: findOrdersByStudent HTTP ${listed.status} — sem caminho de delete`);
+      return null;
+    }
+    const pendingOrders = collectPendingOrders(listed.body);
+    const tagLower = tag.toLowerCase();
+    const matches = pendingOrders.filter((order) => {
+      if (order.id_turma && Number(order.id_turma) === Number(idTurma)) return true;
+      const orderTag = String(order.tag ?? order.tag_curso ?? order.curso ?? "").toLowerCase();
+      return orderTag === tagLower;
+    });
+    if (!matches.length) {
+      onLog(`[enroll] recovery: ${pendingOrders.length} order(s) PENDING, nenhuma da tag/turma — sem delete`);
+      return null;
+    }
+    if (matches.length > 3) {
+      onLog(`[enroll] recovery: ${matches.length} orders PENDING ambiguas para tag=${tag} — abortando delete por seguranca`);
+      return null;
+    }
+    let deletedOrderId = null;
+    for (const order of matches.slice(0, 3)) {
+      try {
+        const deleted = await artClient.deleteOrder({ idOrder: order.id_order, xApiKey, token: getToken() });
+        onLog(`[enroll] recovery: DELETE order ${order.id_order} -> HTTP ${deleted.status} ${String(deleted.text ?? "").slice(0, 40)}`);
+        if (deleted.status === 200 && String(deleted.text ?? "").trim() === "1") deletedOrderId = order.id_order;
+      } catch (error) {
+        onLog(`[enroll] recovery: delete da order ${order.id_order} falhou (${String(error).slice(0, 80)})`);
+      }
+    }
+    if (!deletedOrderId) return null;
+    const phase3 = await artClient.startCheckoutProcess({ payload, xApiKey, token: getToken() });
+    onLog(`[enroll] recovery: re-enroll limpo HTTP ${phase3.status}: ${String(phase3.text ?? "").slice(0, 160)}`);
+    const wait = await artClient.waitForEnrollment({
+      tag,
+      email,
+      xApiKey,
+      token: getToken(),
+      onProbe: ({ probe, status, courseCount }) => onLog(`[enroll] recovery probe ${probe} HTTP ${status} cursos=${courseCount ?? "?"}`),
+      onUnauthorized: relogin,
+    });
+    if (!wait.enrollment) return null;
+    return { enrollment: wait.enrollment, deletedOrderId };
+  }
+
   async function enrollStudent({ email, cpf, tag, fullName, phone = null, birthDate = null, address = null, financialInstitution = "", affiliate = "", candidateTurmas = null, onLog = () => {} }) {
     const xApiKey = generateXApiKey();
     const carrierToken = await discoverCarrierToken(xApiKey);
@@ -335,7 +404,26 @@ export function createEnrollmentService(artClient, config = {}) {
     });
 
     if (!wait.enrollment) {
-      return { status: pending ? "PENDING" : "NOT_CREATED", userId: session.userId, idTurma, turmaSelection: turma.selectionReason, phase2Http: phase2.status, phase2Body: phase2.body };
+      // Order PENDING zumbi: invisível no findCoursesByStudent, bloqueia re-enroll
+      // (400) e espera um flip assíncrono que pode nunca vir. Caminho determinístico
+      // validado na pesquisa (art_unenroll_all.py): achar a order PENDING da
+      // tag/turma via findOrdersByStudent, DELETAR e re-enviar o enroll limpo —
+      // a nova order type=free nasce APPROVED na hora.
+      const recovery = await recoverStuckPendingOrder({
+        tag,
+        idTurma,
+        email,
+        idUsuario: platformProfile?.id_usuario ?? session.raw?.id_usuario ?? null,
+        payload,
+        xApiKey,
+        getToken: () => session.token,
+        relogin,
+        onLog,
+      });
+      if (!recovery) {
+        return { status: pending ? "PENDING" : "NOT_CREATED", userId: session.userId, idTurma, turmaSelection: turma.selectionReason, phase2Http: phase2.status, phase2Body: phase2.body };
+      }
+      return { status: "CONFIRMED", userId: session.userId, idTurma, turmaSelection: turma.selectionReason, enrollment: recovery.enrollment, recoveredOrderId: recovery.deletedOrderId, phase2Http: phase2.status };
     }
     return { status: "CONFIRMED", userId: session.userId, idTurma, turmaSelection: turma.selectionReason, enrollment: wait.enrollment, phase2Http: phase2.status };
   }

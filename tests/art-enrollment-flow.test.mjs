@@ -300,6 +300,67 @@ test("enrollStudent: cohort do catalogo morto cai na descoberta RS256 da conta",
   assert.ok(logs.some((l) => l.includes("descoberta-RS256 resolveu provisao 4097")), logs.join("\n"));
 });
 
+test("enrollStudent: order PENDING zumbi é deletada e o re-enroll nasce APPROVED (recovery)", async () => {
+  // Caminho Karine/determinístico da pesquisa: a order PENDING travada bloqueia
+  // re-enroll com 400 e não flipa. O recovery localiza SÓ a order PENDING da
+  // tag/turma, deleta e re-envia — a nova order nasce APPROVED. Orders PENDING
+  // de outros cursos do mesmo aluno não podem ser tocadas.
+  const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
+  const deleted = [];
+  let enrollCalls = 0;
+  let approvedNow = false;
+  const dynamicTurmas = [
+    { id_turma: 4155, tag_curso: "cfp-2026_54", nome: "10 anos", ativa: 1, data_inicio_aulas: "2026-07-02" },
+  ];
+  async function handler(url, options = {}) {
+    const u = new URL(url);
+    const path = u.pathname;
+    if (path === "/api/login") return json({ response: { status: "SUCCESS", data: { token: "rs256-real-do-aluno", id: 11833 } } });
+    if (path === "/v1/checkout/prepare") return json({ course: { tag_curso: "cfp-2026_54", nome: "Curso", valor_curso: 9997 } });
+    if (path === "/v1/services/turmas") return json({ current_page: 1, last_page: 1, data: dynamicTurmas });
+    if (path === "/v1/checkout/findStudent") return json({ id_usuario: 555777, nome: "Karine", sobre_nome: "Santiago", documento: "191.000.000-00" });
+    if (path === "/v1/services/student/metrics") return json({}, 405);
+    if (path === "/v1/services/aluno/findOrdersByStudent") {
+      return json({ data: { orders: [
+        { id_order: 9990001, status: "PENDING", id_turma: 4155, curso: "CFP 60 dias" },
+        { id_order: 9990002, status: "APPROVED", id_turma: 1111, curso: "Outro curso", tag: "cfa_2025" },
+        { id_order: 9990003, status: "PENDING", id_turma: 2222, tag: "cproi2026", curso: "CPRO-I" },
+      ] } });
+    }
+    if (path.startsWith("/v1/crud/orders/")) {
+      deleted.push(path.split("/").pop());
+      return new Response("1", { status: 200 });
+    }
+    if (path === "/v1/checkout/process/start") {
+      enrollCalls += 1;
+      if (enrollCalls === 1) return json({ error: ["Ops! O seu pagamento está sendo processado."] }, 400);
+      approvedNow = true;
+      return json({ ok: true }, 200);
+    }
+    if (path === "/v1/services/aluno/findCoursesByStudent") {
+      return json(approvedNow ? [{ tag: "cfp-2026_54", status: "APPROVED", id_turma: 4155 }] : []);
+    }
+    return json({ error: "not found" }, 404);
+  }
+  const client = createArtClient({ pollIntervalMs: 1, pollTimeoutMs: 3000 }, handler);
+  const service = createEnrollmentService(client, { provisionTimeoutMs: 2000 });
+
+  const logs = [];
+  const result = await service.enrollStudent({
+    email: "karine@example.com",
+    cpf: "19100000000",
+    tag: "cfp-2026_54",
+    fullName: "Karine Santiago",
+    onLog: (line) => logs.push(line),
+  });
+
+  assert.equal(result.status, "CONFIRMED");
+  assert.equal(result.recoveredOrderId, 9990001, "recuperou deletando exatamente a order PENDING da turma");
+  assert.deepEqual(deleted, ["9990001"], "somente a order certa foi deletada — as outras ficaram intactas");
+  assert.equal(enrollCalls, 2, "um re-enroll limpo após o delete");
+  assert.ok(logs.some((l) => l.includes("DELETE order 9990001")), logs.join("\n"));
+});
+
 test("enrollStudent: alinha o documento ao perfil ja registrado na plataforma (mismatch de CPF)", async () => {
   // Caso Karine (producao 2026-07-29): conta existente com documento A no perfil
   // da plataforma, pedido PULSO com documento B. A fase 2 precisa mandar o

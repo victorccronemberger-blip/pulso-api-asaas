@@ -91,6 +91,25 @@ export function createArtClient(config = {}, fetchImplementation = fetch) {
     return requestJson(url, { headers: headersFor(xApiKey, token) });
   }
 
+  // Lista TODAS as orders do aluno — inclusive PENDING, que é invisível no
+  // findCoursesByStudent (pesquisa: art_cancel_test.py / art_unenroll_all.py).
+  function findOrdersByStudent({ idUsuario, xApiKey, token }) {
+    return requestJson(`${apiOrigin}/v1/services/aluno/findOrdersByStudent`, {
+      method: "POST",
+      headers: headersFor(xApiKey, token, true),
+      body: JSON.stringify({ id_usuario: Number(idUsuario) }),
+    });
+  }
+
+  // Soft delete de order (técnica confirmada na pesquisa: resposta body "1").
+  // Usado para destravar order PENDING zumbi antes do re-enroll determinístico.
+  function deleteOrder({ idOrder, xApiKey, token }) {
+    return requestJson(`${apiOrigin}/v1/crud/orders/${encodeURIComponent(String(idOrder))}`, {
+      method: "DELETE",
+      headers: headersFor(xApiKey, token),
+    });
+  }
+
   function findCoursesByStudent({ email, xApiKey, token }) {
     const url = new URL(`${apiOrigin}/v1/services/aluno/findCoursesByStudent`);
     url.searchParams.set("email", email);
@@ -157,6 +176,8 @@ export function createArtClient(config = {}, fetchImplementation = fetch) {
     listTurmasPage,
     listAllTurmas,
     findStudent,
+    findOrdersByStudent,
+    deleteOrder,
     findCoursesByStudent,
     syncStudentProfile,
     startCheckoutProcess,
