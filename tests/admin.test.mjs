@@ -41,7 +41,7 @@ test("quotes only eligible coupons and publishes the campaign without leaking ad
   await store.saveCoupon({ code: "CPA20", discountBps: 2000, active: true, startsAt: null, endsAt: null, maxRedemptions: 1, productSlugs: ["novo-cpa"] });
   await store.saveCampaign({ activeCouponCode: "CPA20", headline: "Condi\u00e7\u00e3o de lan\u00e7amento" });
   const quote = await fetch(`${base}/v1/public/quote`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ slugs: ["novo-cpa"], couponCode: "CPA20" }) });
-  assert.equal(quote.status, 200); assert.equal((await quote.json()).discountCents, 15_000);
+  assert.equal(quote.status, 200); assert.equal((await quote.json()).discountCents, 9_970);
   const scopedOut = await fetch(`${base}/v1/public/quote`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ slugs: ["cpro-i"], couponCode: "CPA20" }) });
   assert.equal(scopedOut.status, 400);
   const campaign = await fetch(`${base}/v1/public/campaign`);

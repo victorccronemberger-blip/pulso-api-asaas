@@ -124,7 +124,7 @@ test("creates a Pix charge from server-authoritative prices", async (context) =>
         id: "pay_pulso6001",
         status: "PENDING",
         billingType: "PIX",
-        value: 1248.5,
+        value: 997,
         dueDate: "2026-07-29",
         description: "CPA 2026 + ANCORD 2026",
         externalReference: payload.externalReference,
@@ -158,18 +158,18 @@ test("creates a Pix charge from server-authoritative prices", async (context) =>
     status: "open",
     method: "pix",
     installments: 1,
-    installmentCents: 124_850,
-    totalCents: 124_850,
+    installmentCents: 99_700,
+    totalCents: 99_700,
     pix: { qrCodeBase64: "aW1hZ2U=", emv: "000201PULSO", expiresAt: "2026-07-29" },
   });
   const payment = calls.find(([name]) => name === "payment")[1];
   assert.equal(payment.billingType, "PIX");
-  assert.equal(payment.value, 1248.5);
+  assert.equal(payment.value, 997);
   assert.match(payment.externalReference, /^pulso:/);
   const callbackUpdate = calls.find(([name]) => name === "update")[2];
   assert.deepEqual(callbackUpdate, {
     billingType: "PIX",
-    value: 1248.5,
+    value: 997,
     dueDate: "2026-07-29",
     callback: {
       successUrl: "https://pulso.cyara.com.br/checkout/sucesso/?order_id=pay_pulso6001",
@@ -226,8 +226,8 @@ test("creates a finite Pix installment plan without increasing the customer tota
     status: "open",
     method: "pix_installment",
     installments: 3,
-    installmentCents: 25_000,
-    totalCents: 75_000,
+    installmentCents: 16_617,
+    totalCents: 49_850,
     pix: {
       qrCodeBase64: "aW1hZ2U=",
       emv: "000201PULSOPARCELADO",
@@ -237,7 +237,7 @@ test("creates a finite Pix installment plan without increasing the customer tota
   const payment = calls.find(([name]) => name === "payment")[1];
   assert.equal(payment.billingType, "PIX");
   assert.equal(payment.installmentCount, 3);
-  assert.equal(payment.totalValue, 750);
+  assert.equal(payment.totalValue, 498.5);
   assert.equal("value" in payment, false);
 });
 
@@ -253,7 +253,7 @@ test("recovers a Pix QR Code without creating a second charge", async (context) 
         id: "pay_pix_recovery",
         status: "PENDING",
         billingType: "PIX",
-        value: 750,
+        value: 498.5,
         dueDate: "2026-07-29",
         description: "CPA 2026",
         externalReference: payload.externalReference,
@@ -264,7 +264,7 @@ test("recovers a Pix QR Code without creating a second charge", async (context) 
       id,
       status: "PENDING",
       billingType: "PIX",
-      value: 750,
+      value: 498.5,
       dueDate: "2026-07-29",
       invoiceUrl: "https://sandbox.asaas.com/i/recovery",
     }),
@@ -293,8 +293,8 @@ test("recovers a Pix QR Code without creating a second charge", async (context) 
     status: "open",
     method: "pix",
     installments: 1,
-    installmentCents: 75_000,
-    totalCents: 75_000,
+    installmentCents: 49_850,
+    totalCents: 49_850,
     pixPending: true,
   });
 
@@ -326,7 +326,7 @@ test("creates a ten-installment hosted Asaas invoice without receiving card data
         id: "pay_pulso6002",
         status: "PENDING",
         billingType: "CREDIT_CARD",
-        value: 75,
+        value: 49.85,
         dueDate: "2026-07-29",
         description: "CPA 2026",
         externalReference: payload.externalReference,
@@ -355,18 +355,18 @@ test("creates a ten-installment hosted Asaas invoice without receiving card data
     status: "open",
     method: "credit_card",
     installments: 10,
-    totalCents: 75_000,
+    totalCents: 49_850,
     redirectUrl: "https://sandbox.asaas.com/i/6002",
   });
   assert.equal(calls[0].billingType, "CREDIT_CARD");
   assert.equal(calls[0].installmentCount, 10);
-  assert.equal(calls[0].totalValue, 750);
+  assert.equal(calls[0].totalValue, 498.5);
   assert.equal("value" in calls[0], false);
   assert.equal(JSON.stringify(calls[0]).includes("creditCard"), false);
   assert.equal(JSON.stringify(calls[0]).includes("cvv"), false);
   assert.deepEqual(calls[1], {
     billingType: "CREDIT_CARD",
-    value: 75,
+    value: 49.85,
     dueDate: "2026-07-29",
     callback: {
       successUrl: "https://pulso.cyara.com.br/checkout/sucesso/?order_id=pay_pulso6002",
@@ -396,17 +396,17 @@ test("returns card terms separately without claiming Pix is interest-free", asyn
   assert.equal(result.pixInstallments.length, 5);
   assert.deepEqual(result.pixInstallments[0], {
     number: 2,
-    totalCents: 75_000,
-    installmentCents: 37_500,
-    lastInstallmentCents: 37_500,
-    installmentAmountsCents: [37_500, 37_500],
+    totalCents: 49_850,
+    installmentCents: 24_925,
+    lastInstallmentCents: 24_925,
+    installmentAmountsCents: [24_925, 24_925],
   });
   assert.deepEqual(result.installments[9], {
     number: 10,
-    totalCents: 75_000,
-    installmentCents: 7_500,
-    lastInstallmentCents: 7_500,
-    installmentAmountsCents: Array(10).fill(7_500),
+    totalCents: 49_850,
+    installmentCents: 4_985,
+    lastInstallmentCents: 4_985,
+    installmentAmountsCents: Array(10).fill(4_985),
     interestFree: true,
   });
 });
