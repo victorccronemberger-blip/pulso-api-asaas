@@ -11,7 +11,12 @@
     "officialPriceCents": 1794600,
     "priceCents": 897300,
     "featured": true,
-    "keywords": ["vitalício", "formação", "mercado financeiro"]
+    "keywords": [
+      "vitalício",
+      "formação",
+      "mercado financeiro"
+    ],
+    "active": false
   },
   {
     "slug": "agropulse",
@@ -25,7 +30,12 @@
     "officialPriceCents": 199700,
     "priceCents": 99850,
     "featured": false,
-    "keywords": ["agro", "agronegócio", "relacionamento"]
+    "keywords": [
+      "agro",
+      "agronegócio",
+      "relacionamento"
+    ],
+    "active": false
   },
   {
     "slug": "ancord-2026",
@@ -40,7 +50,11 @@
     "officialPriceCents": 99700,
     "priceCents": 49850,
     "featured": true,
-    "keywords": ["ancord", "assessor", "certificação"]
+    "keywords": [
+      "ancord",
+      "assessor",
+      "certificação"
+    ]
   },
   {
     "slug": "biblia-simulados-cfp-2026",
@@ -55,7 +69,12 @@
     "officialPriceCents": 199700,
     "priceCents": 99850,
     "featured": false,
-    "keywords": ["cfp", "simulados", "questões"]
+    "keywords": [
+      "cfp",
+      "simulados",
+      "questões"
+    ],
+    "active": false
   },
   {
     "slug": "cfa-combo-l1-l2-l3",
@@ -69,7 +88,14 @@
     "officialPriceCents": 1199700,
     "priceCents": 599850,
     "featured": true,
-    "keywords": ["cfa", "combo", "level 1", "level 2", "level 3"]
+    "keywords": [
+      "cfa",
+      "combo",
+      "level 1",
+      "level 2",
+      "level 3"
+    ],
+    "active": false
   },
   {
     "slug": "cfa-level-ii",
@@ -83,7 +109,13 @@
     "officialPriceCents": 1499700,
     "priceCents": 749850,
     "featured": true,
-    "keywords": ["cfa", "level ii", "valuation", "análise"]
+    "keywords": [
+      "cfa",
+      "level ii",
+      "valuation",
+      "análise"
+    ],
+    "active": false
   },
   {
     "slug": "cfg-2026",
@@ -98,7 +130,11 @@
     "officialPriceCents": 600000,
     "priceCents": 300000,
     "featured": true,
-    "keywords": ["cfg", "fundos", "gestão"]
+    "keywords": [
+      "cfg",
+      "fundos",
+      "gestão"
+    ]
   },
   {
     "slug": "cfp-60-dias-exame-54",
@@ -113,7 +149,12 @@
     "officialPriceCents": 999700,
     "priceCents": 499850,
     "featured": true,
-    "keywords": ["cfp", "exame 54", "60 dias"]
+    "keywords": [
+      "cfp",
+      "exame 54",
+      "60 dias"
+    ],
+    "active": false
   },
   {
     "slug": "cfp-modular-completo",
@@ -127,7 +168,12 @@
     "officialPriceCents": 999700,
     "priceCents": 499850,
     "featured": true,
-    "keywords": ["cfp", "modular", "planejamento"]
+    "keywords": [
+      "cfp",
+      "modular",
+      "planejamento"
+    ],
+    "active": false
   },
   {
     "slug": "cga-2026",
@@ -142,7 +188,11 @@
     "officialPriceCents": 400000,
     "priceCents": 200000,
     "featured": true,
-    "keywords": ["cga", "gestor", "portfólio"]
+    "keywords": [
+      "cga",
+      "gestor",
+      "portfólio"
+    ]
   },
   {
     "slug": "cge-2026",
@@ -157,7 +207,11 @@
     "officialPriceCents": 200000,
     "priceCents": 100000,
     "featured": false,
-    "keywords": ["cge", "fundos estruturados", "gestão"]
+    "keywords": [
+      "cge",
+      "fundos estruturados",
+      "gestão"
+    ]
   },
   {
     "slug": "cnpi-conteudo-brasileiro",
@@ -172,7 +226,12 @@
     "officialPriceCents": 99700,
     "priceCents": 49850,
     "featured": false,
-    "keywords": ["cnpi", "conteúdo brasileiro", "apimec"]
+    "keywords": [
+      "cnpi",
+      "conteúdo brasileiro",
+      "apimec"
+    ],
+    "active": false
   },
   {
     "slug": "cnpi-conteudo-global",
@@ -187,7 +246,12 @@
     "officialPriceCents": 250000,
     "priceCents": 125000,
     "featured": false,
-    "keywords": ["cnpi", "conteúdo global", "análise"]
+    "keywords": [
+      "cnpi",
+      "conteúdo global",
+      "análise"
+    ],
+    "active": false
   },
   {
     "slug": "cnpi-conteudo-tecnico",
@@ -202,7 +266,12 @@
     "officialPriceCents": 250000,
     "priceCents": 125000,
     "featured": false,
-    "keywords": ["cnpi", "conteúdo técnico", "análise técnica"]
+    "keywords": [
+      "cnpi",
+      "conteúdo técnico",
+      "análise técnica"
+    ],
+    "active": false
   },
   {
     "slug": "cnpi-pleno",
@@ -218,7 +287,11 @@
     "priceCents": 250000,
     "featured": true,
     "active": false,
-    "keywords": ["cnpi", "pleno", "apimec"]
+    "keywords": [
+      "cnpi",
+      "pleno",
+      "apimec"
+    ]
   },
   {
     "slug": "novo-cpa",
@@ -233,7 +306,12 @@
     "officialPriceCents": 150000,
     "priceCents": 75000,
     "featured": true,
-    "keywords": ["cpa", "anbima", "banco", "primeira certificação"]
+    "keywords": [
+      "cpa",
+      "anbima",
+      "banco",
+      "primeira certificação"
+    ]
   },
   {
     "slug": "cpro-i",
@@ -248,7 +326,11 @@
     "officialPriceCents": 249700,
     "priceCents": 124850,
     "featured": true,
-    "keywords": ["cpro-i", "investimentos", "anbima"]
+    "keywords": [
+      "cpro-i",
+      "investimentos",
+      "anbima"
+    ]
   },
   {
     "slug": "cpro-r",
@@ -263,7 +345,12 @@
     "officialPriceCents": 299700,
     "priceCents": 149850,
     "featured": true,
-    "keywords": ["cpro-r", "relacionamento", "anbima", "cliente"]
+    "keywords": [
+      "cpro-r",
+      "relacionamento",
+      "anbima",
+      "cliente"
+    ]
   },
   {
     "slug": "excel-basico-mercado-financeiro",
@@ -277,7 +364,12 @@
     "officialPriceCents": 49700,
     "priceCents": 24850,
     "featured": false,
-    "keywords": ["excel", "planilhas", "mercado financeiro"]
+    "keywords": [
+      "excel",
+      "planilhas",
+      "mercado financeiro"
+    ],
+    "active": false
   },
   {
     "slug": "gerente-relacionamento",
@@ -291,7 +383,12 @@
     "officialPriceCents": 29700,
     "priceCents": 14850,
     "featured": false,
-    "keywords": ["gerente", "relacionamento", "banco"]
+    "keywords": [
+      "gerente",
+      "relacionamento",
+      "banco"
+    ],
+    "active": false
   },
   {
     "slug": "ia-excel-mercado-financeiro",
@@ -305,7 +402,13 @@
     "officialPriceCents": 49700,
     "priceCents": 24850,
     "featured": false,
-    "keywords": ["ia", "excel", "produtividade", "mercado financeiro"]
+    "keywords": [
+      "ia",
+      "excel",
+      "produtividade",
+      "mercado financeiro"
+    ],
+    "active": false
   },
   {
     "slug": "ia-mercado-financeiro",
@@ -319,7 +422,12 @@
     "officialPriceCents": 49700,
     "priceCents": 24850,
     "featured": false,
-    "keywords": ["ia", "inteligência artificial", "mercado financeiro"]
+    "keywords": [
+      "ia",
+      "inteligência artificial",
+      "mercado financeiro"
+    ],
+    "active": false
   },
   {
     "slug": "investimentos",
@@ -333,7 +441,13 @@
     "officialPriceCents": 12700,
     "priceCents": 6350,
     "featured": false,
-    "keywords": ["investimentos", "risco", "retorno", "alocação"]
+    "keywords": [
+      "investimentos",
+      "risco",
+      "retorno",
+      "alocação"
+    ],
+    "active": false
   },
   {
     "slug": "lidero-2026",
@@ -348,7 +462,12 @@
     "officialPriceCents": 399700,
     "priceCents": 199850,
     "featured": true,
-    "keywords": ["liderança", "gestão", "equipes"]
+    "keywords": [
+      "liderança",
+      "gestão",
+      "equipes"
+    ],
+    "active": false
   },
   {
     "slug": "masterclass-alta-performance",
@@ -363,7 +482,11 @@
     "priceCents": 99850,
     "featured": false,
     "active": false,
-    "keywords": ["alta performance", "produtividade", "carreira"]
+    "keywords": [
+      "alta performance",
+      "produtividade",
+      "carreira"
+    ]
   },
   {
     "slug": "masterclass-lideranca",
@@ -377,7 +500,12 @@
     "officialPriceCents": 12700,
     "priceCents": 6350,
     "featured": false,
-    "keywords": ["liderança", "equipes", "carreira"]
+    "keywords": [
+      "liderança",
+      "equipes",
+      "carreira"
+    ],
+    "active": false
   },
   {
     "slug": "matematica-financeira-2024-2026",
@@ -392,7 +520,12 @@
     "officialPriceCents": 49700,
     "priceCents": 24850,
     "featured": false,
-    "keywords": ["matemática financeira", "juros", "finanças"]
+    "keywords": [
+      "matemática financeira",
+      "juros",
+      "finanças"
+    ],
+    "active": false
   },
   {
     "slug": "plano-financeiro-cfp",
@@ -407,7 +540,12 @@
     "officialPriceCents": 299700,
     "priceCents": 149850,
     "featured": false,
-    "keywords": ["cfp", "plano financeiro", "planejamento"]
+    "keywords": [
+      "cfp",
+      "plano financeiro",
+      "planejamento"
+    ],
+    "active": false
   },
   {
     "slug": "cfa-level-i",
@@ -422,7 +560,11 @@
     "priceCents": 750000,
     "featured": true,
     "active": false,
-    "keywords": ["cfa", "level i", "certificação internacional"]
+    "keywords": [
+      "cfa",
+      "level i",
+      "certificação internacional"
+    ]
   },
   {
     "slug": "cfp-60-dias-2026",
@@ -438,7 +580,11 @@
     "priceCents": 499900,
     "featured": true,
     "active": false,
-    "keywords": ["cfp", "60 dias", "intensivo"]
+    "keywords": [
+      "cfp",
+      "60 dias",
+      "intensivo"
+    ]
   },
   {
     "slug": "renovacao-cfp",
@@ -452,7 +598,12 @@
     "officialPriceCents": 999700,
     "priceCents": 499850,
     "featured": false,
-    "keywords": ["cfp", "renovação", "certificação"]
+    "keywords": [
+      "cfp",
+      "renovação",
+      "certificação"
+    ],
+    "active": false
   },
   {
     "slug": "risco-e-credito",
@@ -466,6 +617,11 @@
     "officialPriceCents": 129700,
     "priceCents": 64850,
     "featured": false,
-    "keywords": ["crédito", "risco", "concessão"]
+    "keywords": [
+      "crédito",
+      "risco",
+      "concessão"
+    ],
+    "active": false
   }
 ]
