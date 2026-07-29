@@ -623,5 +623,198 @@
       "concessão"
     ],
     "active": false
+  },
+  {
+    "slug": "ancord-2026-nattos",
+    "sourceTag": "ancord-2026_3",
+    "title": "ANCORD 2026 - NATTOS",
+    "description": "Turma bônus NATTOS para preparação ANCORD.",
+    "categoryId": "certificacoes",
+    "kind": "course",
+    "accent": "#FF002B",
+    "cohort": "3915",
+    "officialPriceCents": 0,
+    "priceCents": 0,
+    "featured": false,
+    "keywords": [
+      "ancord",
+      "nattos",
+      "bônus"
+    ]
+  },
+  {
+    "slug": "cfp-acesso-antecipado-54",
+    "sourceTag": "cfp-2026_antecipado",
+    "title": "CFP Acesso Antecipado Exame 54",
+    "description": "Acesso antecipado ao material do exame 54 do CFP.",
+    "categoryId": "cfp",
+    "kind": "course",
+    "accent": "#A0001C",
+    "cohort": "4129",
+    "officialPriceCents": 0,
+    "priceCents": 0,
+    "featured": false,
+    "keywords": [
+      "cfp",
+      "antecipado",
+      "exame 54"
+    ]
+  },
+  {
+    "slug": "cfp47-revisao-54",
+    "sourceTag": "cfp47-revisão_54",
+    "title": "CFP Revisão Exame 54",
+    "description": "Revisão direcionada para o exame 54 do CFP.",
+    "categoryId": "cfp",
+    "kind": "course",
+    "accent": "#002962",
+    "cohort": "4118",
+    "officialPriceCents": 0,
+    "priceCents": 0,
+    "featured": false,
+    "keywords": [
+      "cfp",
+      "revisão",
+      "exame 54"
+    ]
+  },
+  {
+    "slug": "concurso-portugues",
+    "sourceTag": "concurso-portugues",
+    "title": "Português para Concursos",
+    "description": "Preparação em língua portuguesa para concursos.",
+    "categoryId": "concursos",
+    "kind": "course",
+    "accent": "#004E89",
+    "cohort": "3327",
+    "officialPriceCents": 0,
+    "priceCents": 0,
+    "featured": false,
+    "keywords": [
+      "português",
+      "concurso"
+    ]
+  },
+  {
+    "slug": "enem-2024",
+    "sourceTag": "enem2024",
+    "title": "ENEM 2024",
+    "description": "Preparação para o ENEM.",
+    "categoryId": "concursos",
+    "kind": "course",
+    "accent": "#407BA7",
+    "cohort": "4073",
+    "officialPriceCents": 0,
+    "priceCents": 0,
+    "featured": false,
+    "keywords": [
+      "enem",
+      "vestibular"
+    ]
+  },
+  {
+    "slug": "kit-cfp",
+    "sourceTag": "kit_cfp",
+    "title": "Kit CFP",
+    "description": "Kit completo de materiais para o CFP.",
+    "categoryId": "cfp",
+    "kind": "bundle",
+    "accent": "#800016",
+    "cohort": "3384",
+    "officialPriceCents": 0,
+    "priceCents": 0,
+    "featured": false,
+    "keywords": [
+      "cfp",
+      "kit",
+      "material"
+    ]
+  },
+  {
+    "slug": "kit-cfp-54",
+    "sourceTag": "kit_cfp_54",
+    "title": "Kit CFP Exame 54",
+    "description": "Kit de materiais direcionado ao exame 54.",
+    "categoryId": "cfp",
+    "kind": "bundle",
+    "accent": "#A0001C",
+    "cohort": "4119",
+    "officialPriceCents": 0,
+    "priceCents": 0,
+    "featured": false,
+    "keywords": [
+      "cfp",
+      "kit",
+      "exame 54"
+    ]
+  },
+  {
+    "slug": "mastermind-art",
+    "sourceTag": "mastermind-ART",
+    "title": "Mastermind ART",
+    "description": "Grupo de mastermind da Academia Rafael Toro.",
+    "categoryId": "carreira",
+    "kind": "course",
+    "accent": "#C00021",
+    "cohort": "4128",
+    "officialPriceCents": 0,
+    "priceCents": 0,
+    "featured": false,
+    "keywords": [
+      "mastermind",
+      "networking"
+    ]
+  },
+  {
+    "slug": "onboarding-parceiros",
+    "sourceTag": "onboarding",
+    "title": "Onboarding Novos Parceiros",
+    "description": "Integração e boas-vindas para novos parceiros.",
+    "categoryId": "carreira",
+    "kind": "course",
+    "accent": "#004E89",
+    "cohort": "457",
+    "officialPriceCents": 0,
+    "priceCents": 0,
+    "featured": false,
+    "keywords": [
+      "onboarding",
+      "parceiros"
+    ]
+  },
+  {
+    "slug": "plan-consultor-invest",
+    "sourceTag": "plan-consultorinvest",
+    "title": "Plan Consultor de Investimentos",
+    "description": "Planejamento para consultoria de investimentos.",
+    "categoryId": "certificacoes",
+    "kind": "course",
+    "accent": "#002962",
+    "cohort": "4116",
+    "officialPriceCents": 0,
+    "priceCents": 0,
+    "featured": false,
+    "keywords": [
+      "consultor",
+      "investimentos",
+      "plan"
+    ]
+  },
+  {
+    "slug": "susepe",
+    "sourceTag": "susepe",
+    "title": "SUSEPE",
+    "description": "Preparação para o concurso da SUSEPE.",
+    "categoryId": "concursos",
+    "kind": "course",
+    "accent": "#407BA7",
+    "cohort": "4137",
+    "officialPriceCents": 0,
+    "priceCents": 0,
+    "featured": false,
+    "keywords": [
+      "susepe",
+      "concurso"
+    ]
   }
 ]
