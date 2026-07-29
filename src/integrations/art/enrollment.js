@@ -132,11 +132,14 @@ export function createEnrollmentService(artClient, config = {}) {
     return valid;
   }
 
-  // Regra de negócio do contrato ART (Rafael, 2026-07-29): matricular na turma
-  // MAIS RECENTE com checkout ativo. `valid` já chega ordenada desc — valid[0].
+  // Regra de negócio ART (operador, 2026-07-29): NÃO pode ser a última turma —
+  // a vigente (ativa_no_site=1) tem valor real e type=free fica PENDING (não
+  // aprova). A PENÚLTIMA "já passou" pro sistema da ART → não tem mais valor
+  // (free, R$0) → type=free APROVA imediato. `valid` chega ordenada desc (mais
+  // recente primeiro) → penúltima = valid[1]; fallback valid[0] se houver só 1.
   function pickVigente(valid) {
-    const chosen = valid[0];
-    return { ...chosen, selectionReason: valid.length >= 2 ? "turma-mais-recente" : "turma-unica", allValid: valid };
+    const chosen = valid.length >= 2 ? valid[1] : valid[0];
+    return { ...chosen, selectionReason: valid.length >= 2 ? "penultima-turma" : "turma-unica", allValid: valid };
   }
 
   // Varredura de ids via prepare (só x-api-key). Recebe faixas [inicio, fim]

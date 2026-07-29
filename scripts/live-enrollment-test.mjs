@@ -36,8 +36,8 @@ const client = createArtClient({
   apiOrigin: "https://api.academiarafaeltoro.com.br",
   idmOrigin: "https://ms-idm.academiarafaeltoro.com.br",
   requestTimeoutMs: 35_000,
-  pollTimeoutMs: 600_000,
-  pollIntervalMs: 10_000,
+  pollTimeoutMs: 60_000,
+  pollIntervalMs: 5_000,
 }, fetchImplementation);
 
 const service = createEnrollmentService(client, {

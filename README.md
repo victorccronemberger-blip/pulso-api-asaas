@@ -144,14 +144,19 @@ A ativação manual e a automática compartilham a mesma fila serializada
 O `id_turma` (cohort) é **dinâmico na ART**: muda várias vezes ao mês (às vezes
 não). Por isso a matrícula **obtém a turma na hora da ativação**, em vez de
 confiar no `cohort` gravado na tabela `products` (que fica obsoleto rápido). O
-`cohort` do banco é só um hint/âncora; a turma efetiva é sempre a **mais recente
-com checkout ativo**, descoberta ao vivo.
+`cohort` do banco é só um hint/âncora para a descoberta ao vivo.
+
+**Regra de seleção — PENÚLTIMA turma** (operador, 2026-07-29): a matrícula NÃO vai
+na última turma (a vigente, `ativa_no_site=1`, que tem valor real — `type=free`
+nela fica PENDING). Vai na **penúltima** (2ª mais recente), que "já passou" para o
+sistema da ART → não tem mais valor (free, R$ 0) → `type=free` **aprova imediato**.
+Exemplo cpa2026: última 4113 (R$ 1500, PENDING) vs penúltima 4058 (R$ 0, APPROVED).
 
 Camadas de descoberta, da mais confiável para a mais bruta:
 
 1. **Service accounts (`ART_SERVICE_ACCOUNTS`) — RECOMENDADO**: login dedicado →
    listagem autoritativa de `/v1/services/turmas` → filtra pela `source_tag` do
-   produto → pega a turma mais recente ativa. **Imune a cohort obsoleto**; é a
+   produto → pega a penúltima turma ativa. **Imune a cohort obsoleto**; é a
    opção que dispensa manter o `cohort` atualizado no banco.
 2. **Scan adaptativo** (fallback, só `x-api-key`): varre ids em torno do cohort
    com alcance alargado à frente (turma anda pra frente) + fronteira persistida

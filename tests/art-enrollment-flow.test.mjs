@@ -44,7 +44,7 @@ function artPlatformMock({ dynamicTurmas, activeOnPrepare = new Set() } = {}) {
   return { calls, fetchImplementation: (url, options) => handler(url, options) };
 }
 
-test("resolveTurma escolhe a turma mais recente com checkout ativo (regra do contrato)", async () => {
+test("resolveTurma escolhe a PENÚLTIMA turma com checkout ativo (regra do contrato)", async () => {
   const mock = artPlatformMock({
     dynamicTurmas: [],
     activeOnPrepare: new Set(["cfp-2026_54:4101", "cfp-2026_54:4099"]),
@@ -58,8 +58,8 @@ test("resolveTurma escolhe a turma mais recente com checkout ativo (regra do con
     xApiKey: "qualquer",
     onLog: (line) => logs.push(line),
   });
-  assert.equal(turma.idTurma, 4101, "regra vigente: a turma MAIS RECENTE vence");
-  assert.equal(turma.selectionReason, "turma-mais-recente");
+  assert.equal(turma.idTurma, 4099, "regra: a PENÚLTIMA turma vence (a última é a vigente/paga; a penúltima 'já passou' → free, type=free aprova)");
+  assert.equal(turma.selectionReason, "penultima-turma");
 });
 
 test("enrollStudent: provisão por cohort + descoberta dinâmica RS256 confirma a turma e efetiva", async () => {
@@ -398,7 +398,7 @@ test("enrollStudent: service-account lista turmas em tempo real (camada primaria
     if (path === "/v1/checkout/findStudent") return json({ error: "not found" }, 404);
     if (path === "/v1/services/student/metrics") return json({}, 405);
     if (path === "/v1/checkout/process/start") return json({ ok: true }, 200);
-    if (path === "/v1/services/aluno/findCoursesByStudent") return json([{ tag: "cfp-2026_54", status: "APPROVED", id_turma: 4160 }]);
+    if (path === "/v1/services/aluno/findCoursesByStudent") return json([{ tag: "cfp-2026_54", status: "APPROVED", id_turma: 4158 }]);
     return json({ error: "not found" }, 404);
   }
   const client = createArtClient({ pollIntervalMs: 1, pollTimeoutMs: 2000 }, handler);
@@ -417,7 +417,7 @@ test("enrollStudent: service-account lista turmas em tempo real (camada primaria
   });
 
   assert.equal(result.status, "CONFIRMED");
-  assert.equal(result.idTurma, 4160, "regra vigente: a turma MAIS RECENTE da listagem real");
+  assert.equal(result.idTurma, 4158, "regra: a PENÚLTIMA turma da listagem real (a última 4160 é a vigente/paga)");
   assert.ok(logs.some((l) => l.includes("service-account svc@pulso.test: 2 turma(s) viva(s) em tempo real")), logs.join("\n"));
 });
 
