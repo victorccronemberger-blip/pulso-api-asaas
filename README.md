@@ -139,11 +139,38 @@ A ativação manual e a automática compartilham a mesma fila serializada
 (`src/integrations/art/queue.js`), com retry, heartbeat e recuperação de jobs
 órfãos. Um job por vez porque o login na ART revoga o RS256 anterior.
 
+### Turma dinâmica — descoberta ao vivo (não confia no cohort gravado)
+
+O `id_turma` (cohort) é **dinâmico na ART**: muda várias vezes ao mês (às vezes
+não). Por isso a matrícula **obtém a turma na hora da ativação**, em vez de
+confiar no `cohort` gravado na tabela `products` (que fica obsoleto rápido). O
+`cohort` do banco é só um hint/âncora; a turma efetiva é sempre a **mais recente
+com checkout ativo**, descoberta ao vivo.
+
+Camadas de descoberta, da mais confiável para a mais bruta:
+
+1. **Service accounts (`ART_SERVICE_ACCOUNTS`) — RECOMENDADO**: login dedicado →
+   listagem autoritativa de `/v1/services/turmas` → filtra pela `source_tag` do
+   produto → pega a turma mais recente ativa. **Imune a cohort obsoleto**; é a
+   opção que dispensa manter o `cohort` atualizado no banco.
+2. **Scan adaptativo** (fallback, só `x-api-key`): varre ids em torno do cohort
+   com alcance alargado à frente (turma anda pra frente) + fronteira persistida
+   por tag. Cobre saltos grandes (caso real: ancord 3396 → 4112, +716).
+
+Configurar `ART_SERVICE_ACCOUNTS` torna a descoberta autoritativa e rápida. Use
+contas que ninguém usa interativamente (o login rotaciona o token e derruba
+sessões alheias). Diagnóstico de saúde dos cohorts (lista cohort morto e descobre
+a turma viva de cada produto):
+
+```bash
+MYSQL_URL='mysql://...' node scripts/check-art-cohorts.mjs
+```
+
 ```text
 ENROLLMENT_ENABLED=true          # liga o motor de matrícula (default: false)
 ART_API_BASE / ART_IDM_BASE      # origens da plataforma
-ART_SERVICE_ACCOUNTS=email:senha,# descoberta de turmas em tempo real (login real)
-  email2:senha2
+ART_SERVICE_ACCOUNTS=email:senha,# descoberta de turmas AO VIVO (autoritativa)
+  email2:senha2                  # fortemente recomendado — ver seção acima
 ART_PROVISION_TIMEOUT_MS / ART_POLL_TIMEOUT_MS / ART_MAX_RETRIES / ...
 ```
 

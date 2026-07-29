@@ -146,14 +146,14 @@ export function createEnrollmentService(artClient, config = {}) {
     const ids = new Set();
     for (const range of ranges ?? []) {
       const start = Math.max(1, Math.floor(Number(range?.[0])));
-      const end = Math.min(Math.floor(Number(range?.[1])), start + 400);
+      const end = Math.min(Math.floor(Number(range?.[1])), start + 1100);
       for (let idTurma = start; idTurma <= end; idTurma += 1) ids.add(idTurma);
     }
     const candidates = [...ids];
     if (!candidates.length) return [];
     onLog(`[turma] scan prepare: ${candidates.length} candidatos para tag=${tag}`);
     const valid = [];
-    const concurrency = 12;
+    const concurrency = 20;
     for (let start = 0; start < candidates.length; start += concurrency) {
       const batch = candidates.slice(start, start + concurrency);
       const results = await Promise.all(batch.map(async (idTurma) => {
@@ -177,9 +177,10 @@ export function createEnrollmentService(artClient, config = {}) {
   // nova. Camadas, da mais dinâmica para a mais bruta:
   //   1. SERVICE ACCOUNTS (ART_SERVICE_ACCOUNTS): login dedicado → RS256 real →
   //      listagem de /v1/services/turmas → filtro por tag → validação via prepare.
-  //   2. SCAN ADAPTATIVO via prepare (só x-api-key): âncoras (cohorts) ±150 +
-  //      fronteira PERSISTIDA por tag (app_settings). Quando acha turma na borda,
-  //      estende e grava — a próxima execução já cobre o território novo.
+  //   2. SCAN ADAPTATIVO via prepare (só x-api-key): âncoras (cohorts) com alcance
+  //      alargado à frente (-80..+1000, porque turma anda pra frente) + fronteira
+  //      PERSISTIDA por tag (app_settings). Quando acha turma na borda, estende e
+  //      grava — a próxima execução já cobre o território novo.
   async function discoverTurmasVivas({ tag, xApiKey, anchors, onLog = () => {} }) {
     for (const account of serviceAccounts) {
       try {
@@ -204,9 +205,11 @@ export function createEnrollmentService(artClient, config = {}) {
     if (store?.getSetting) {
       try { frontier = Number(await store.getSetting(`art-scan-frontier:${tag}`)) || null; } catch { frontier = null; }
     }
-    const ranges = numericAnchors.map((anchor) => [anchor - 150, anchor + 150]);
+    // Turmas andam pra FRENTE (mudam várias vezes ao mês); alarga o alcance à
+    // frente para não perder saltos grandes (caso real: ancord 3396 -> 4112, +716).
+    const ranges = numericAnchors.map((anchor) => [anchor - 80, anchor + 1000]);
     const frontierStart = frontier ?? (numericAnchors.length ? Math.max(...numericAnchors) + 151 : 4130);
-    ranges.push([frontierStart, frontierStart + 250]);
+    ranges.push([frontierStart, frontierStart + 500]);
     const valid = await scanTurmasViaPrepare({ tag, xApiKey, ranges, onLog });
     if (valid.length && store?.setSetting) {
       const maxFound = Math.max(...valid.map((v) => v.idTurma));
@@ -351,18 +354,32 @@ export function createEnrollmentService(artClient, config = {}) {
       ...(address ?? {}),
     };
 
-    // Fast path: cohort do catálogo validado via prepare (só x-api-key). Se o
-    // cohort do catálogo está morto (checkout fechado), NÃO desiste: descobre as
-    // turmas vivas (service-account RS256 / scan adaptativo via prepare).
+    // Resolução da turma (contrato ART, OPÇÃO 2: a turma é OBTIDA NA ATIVAÇÃO,
+    // não confiada ao cohort gravado — ele é dinâmico e fica obsoleto rápido,
+    // muda várias vezes ao mês).
+    //   1. Com service accounts: descoberta AO VIVO autoritativa — lista as turmas
+    //      ativas reais da tag (/v1/services/turmas) e pega a mais recente. Imune
+    //      a cohort stale; não depende do valor gravado no banco.
+    //   2. Sem service account: cohort como HINT validado via prepare (caminho
+    //      rápido); se estiver morto, o scan adaptativo alargado acha a turma viva.
     let turmaProvisao = null;
-    try {
-      turmaProvisao = await resolveTurma({ tag, candidateTurmas: provisionCandidates, xApiKey, onLog });
-    } catch (error) {
-      onLog(`[turma] catalogo sem turma ativa (${String(error).slice(0, 120)}) — descoberta dinamica (service-account/scan adaptativo)`);
+    if (serviceAccounts.length) {
       const discovered = await discoverTurmasVivas({ tag, xApiKey, anchors: provisionCandidates, onLog });
       if (discovered.length) {
         turmaProvisao = pickVigente(discovered);
-        onLog(`[turma] descoberta dinamica resolveu provisao ${turmaProvisao.idTurma} (${turmaProvisao.selectionReason})`);
+        onLog(`[turma] descoberta ao vivo (service account) resolveu ${turmaProvisao.idTurma} (${turmaProvisao.selectionReason})`);
+      }
+    }
+    if (!turmaProvisao) {
+      try {
+        turmaProvisao = await resolveTurma({ tag, candidateTurmas: provisionCandidates, xApiKey, onLog });
+      } catch (error) {
+        onLog(`[turma] cohort morto (${String(error).slice(0, 120)}) — scan adaptativo alargado`);
+        const discovered = await discoverTurmasVivas({ tag, xApiKey, anchors: provisionCandidates, onLog });
+        if (discovered.length) {
+          turmaProvisao = pickVigente(discovered);
+          onLog(`[turma] scan adaptativo resolveu provisao ${turmaProvisao.idTurma} (${turmaProvisao.selectionReason})`);
+        }
       }
     }
 

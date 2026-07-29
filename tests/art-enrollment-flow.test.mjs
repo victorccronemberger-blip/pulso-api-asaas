@@ -326,12 +326,13 @@ test("enrollStudent: payload de provisão é FIEL à SPA (card RSA, detailsCupom
 });
 
 test("enrollStudent: cohort morto + scan vazio → descoberta RS256 da conta resolve", async () => {
-  // Última camada dinâmica: catálogo morto, scan adaptativo não alcança a turma
-  // (id fora das faixas), mas a conta do comprador existe → listagem RS256 real.
+  // Última camada dinâmica: catálogo morto, scan adaptativo NÃO alcança a turma
+  // (id MUITO fora das faixas alargadas, >+1000), mas a conta do comprador existe
+  // → listagem RS256 real resolve a turma vigente.
   const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
   const dynamicTurmas = [
-    { id_turma: 5000, tag_curso: "cfp-2026_54", nome: "Turma nova distante", ativa: 1, data_inicio_aulas: "2026-09-01" },
-    { id_turma: 5001, tag_curso: "outra_tag", nome: "outra", ativa: 1, data_inicio_aulas: "2026-09-01" },
+    { id_turma: 6500, tag_curso: "cfp-2026_54", nome: "Turma nova distante", ativa: 1, data_inicio_aulas: "2026-09-01" },
+    { id_turma: 6501, tag_curso: "outra_tag", nome: "outra", ativa: 1, data_inicio_aulas: "2026-09-01" },
   ];
   async function handler(url, options = {}) {
     const u = new URL(url);
@@ -341,14 +342,14 @@ test("enrollStudent: cohort morto + scan vazio → descoberta RS256 da conta res
       const tag = u.searchParams.get("tag");
       const idTurma = u.searchParams.get("id_turma");
       if (tag === "cpa2026" && idTurma === "4058") return json({ course: { tag_curso: tag, nome: "CPA", valor_curso: 1500 } });
-      if (tag === "cfp-2026_54" && idTurma === "5000") return json({ course: { tag_curso: tag, nome: "CFP", valor_curso: 4998 } });
+      if (tag === "cfp-2026_54" && idTurma === "6500") return json({ course: { tag_curso: tag, nome: "CFP", valor_curso: 4998 } });
       return json({ error: "Course not found" }, 404);
     }
     if (path === "/v1/services/turmas") return json({ current_page: 1, last_page: 1, data: dynamicTurmas });
     if (path === "/v1/checkout/findStudent") return json({ error: "not found" }, 404);
     if (path === "/v1/services/student/metrics") return json({}, 405);
     if (path === "/v1/checkout/process/start") return json({ ok: true }, 200);
-    if (path === "/v1/services/aluno/findCoursesByStudent") return json([{ tag: "cfp-2026_54", status: "APPROVED", id_turma: 5000 }]);
+    if (path === "/v1/services/aluno/findCoursesByStudent") return json([{ tag: "cfp-2026_54", status: "APPROVED", id_turma: 6500 }]);
     return json({ error: "not found" }, 404);
   }
   const client = createArtClient({ pollIntervalMs: 1, pollTimeoutMs: 2000 }, handler);
@@ -364,9 +365,9 @@ test("enrollStudent: cohort morto + scan vazio → descoberta RS256 da conta res
   });
 
   assert.equal(result.status, "CONFIRMED");
-  assert.equal(result.idTurma, 5000, "descoberta RS256 achou a turma fora das faixas de scan");
-  assert.ok(logs.some((l) => l.includes("catalogo sem turma ativa")), logs.join("\n"));
-  assert.ok(logs.some((l) => l.includes("descoberta-RS256 resolveu provisao 5000")), logs.join("\n"));
+  assert.equal(result.idTurma, 6500, "descoberta RS256 achou a turma muito fora das faixas de scan");
+  assert.ok(logs.some((l) => l.includes("scan adaptativo alargado")), logs.join("\n"));
+  assert.ok(logs.some((l) => l.includes("descoberta-RS256 resolveu provisao 6500")), logs.join("\n"));
 });
 
 test("enrollStudent: service-account lista turmas em tempo real (camada primaria dinamica)", async () => {
