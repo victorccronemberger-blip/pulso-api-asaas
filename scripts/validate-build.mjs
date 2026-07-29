@@ -25,13 +25,13 @@ await Promise.all([
 ]);
 
 // The ART course-enrollment connector under src/integrations/art is a sanctioned,
-// operator-owned integration with the operator's own course platform. It is the single
-// place permitted to mint the platform's carrier transport token (unsigned JWT). This
-// guard keeps that pattern out of every OTHER part of the codebase.
-const sanctionedArtDir = path.resolve(fileURLToPath(new URL("../src/integrations/art", import.meta.url)));
+// operator-owned integration with the operator's own course platform. The validated
+// flow no longer mints any unsigned (alg=none) transport JWT — it runs on a real
+// RS256 login plus the static x-api-key only. This guard keeps alg=none /
+// forgeTransportJwt out of the ENTIRE codebase (art dir included) so the unsigned
+// transport token cannot be reintroduced anywhere.
 const forbiddenSource = /\b(?:alg\s*[:=]\s*["']none|forgeTransportJwt)\b/i;
 async function assertNoUnsafeEnrollmentCode(directory) {
-  if (path.resolve(directory) === sanctionedArtDir) return;
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const target = path.join(directory, entry.name);
     if (entry.isDirectory()) await assertNoUnsafeEnrollmentCode(target);

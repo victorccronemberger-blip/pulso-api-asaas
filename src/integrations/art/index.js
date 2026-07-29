@@ -26,9 +26,6 @@ export function createArtIntegration({ environment, store, log = console.log }) 
   }, fetchImplementation);
 
   const enrollmentService = createEnrollmentService(artClient, {
-    carrierUserIds: environment.artCarrierUserIds,
-    carrierProbeTag: environment.artCarrierProbeTag,
-    carrierProbeTurma: environment.artCarrierProbeTurma,
     provisionTimeoutMs: environment.artProvisionTimeoutMs,
     serviceAccounts: environment.artServiceAccounts,
     store,

@@ -1,7 +1,28 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { forgeTransportJwt, generateXApiKey } from "./credentials.js";
+import { randomBytes } from "node:crypto";
+import { encryptCard, generateXApiKey } from "./credentials.js";
 import { getCohortBySourceTag } from "../../domain/catalog.js";
 
+// Cartão vazio no formato exato da SPA de checkout (ordem de chaves incluída).
+// É cifrado com a chave pública da ART e enviado mesmo em matrícula gratuita —
+// faz parte do payload FIEL que a plataforma aceita sem crashar.
+const EMPTY_CARD = Object.freeze({
+  type: "",
+  brand: "",
+  card_number: "",
+  expiration_month: "",
+  expiration_year: "",
+  holder_document: "",
+  holder_name: "",
+  security_code: "",
+});
+
+// Payload FIEL ao onFinish da SPA de checkout da ART. A pesquisa validou que
+// payloads "pobres" (card:"", detailsCupom:"") crasham o provisionamento ANTES
+// de criar a conta; este formato (cartão cifrado, detailsCupom objeto,
+// getnet_fingerprint, promo_opt_in, contract:true) provisiona de forma confiável
+// e permite o fluxo inteiro SEM nenhum token alg=none — a fase 1 roda só com
+// x-api-key e a conta nasce com senha = CPF do comprador.
 export function buildEnrollPayload({
   tag,
   idTurma,
@@ -39,14 +60,16 @@ export function buildEnrollPayload({
     type: "free",
     expiry: "",
     cupom: "",
-    card: "",
+    card: encryptCard(EMPTY_CARD),
     installments: 1,
     afiliado: affiliate,
     complement,
-    contract: false,
-    contractPrivacity: false,
-    detailsCupom: "",
+    contract: true,
+    contractPrivacity: true,
+    promo_opt_in: false,
+    detailsCupom: { valid: false, cashValue: 0, value: 0 },
     selectedModules: [],
+    getnet_fingerprint: randomBytes(16).toString("hex"),
   };
 }
 
@@ -62,14 +85,14 @@ function compareTurmaDesc(a, b) {
   return bId - aId;
 }
 
-// Motor de matrícula na plataforma ART. Recebe um cliente ART configurado e devolve
-// as operações de alto nível usadas pela fila de processamento.
+// Motor de matrícula na plataforma ART. Fluxo real validado (pesquisa
+// CURSOS-BANCARIOS, 2026-07-29), sem nenhum token alg=none:
+//   fase 1 — process/start só com x-api-key + payload fiel → provisiona a conta
+//            (senha = CPF) e cria a order type=free;
+//   login  — email + CPF → JWT RS256 REAL do comprador;
+//   fase 2 — process/start com o RS256 (sub == user_id do email) → efetiva;
+//   polling — findCoursesByStudent (RS256) até a matrícula aparecer.
 export function createEnrollmentService(artClient, config = {}) {
-  const carrierUserIds = Array.isArray(config.carrierUserIds) && config.carrierUserIds.length
-    ? config.carrierUserIds.map((value) => String(value).trim()).filter(Boolean)
-    : ["204112", "204186", "204290", "204215"];
-  const probeTag = String(config.carrierProbeTag ?? "cpa2026");
-  const probeTurma = Number(config.carrierProbeTurma ?? 4058);
   const provisionTimeoutMs = Number(config.provisionTimeoutMs ?? 120_000);
   const defaultPhone = config.defaultPhone ?? "11999999999";
   const defaultBirthDate = config.defaultBirthDate ?? "1990-01-01";
@@ -78,19 +101,9 @@ export function createEnrollmentService(artClient, config = {}) {
     : [];
   const store = config.store ?? null;
 
-  async function discoverCarrierToken(xApiKey) {
-    for (const userId of carrierUserIds) {
-      const token = forgeTransportJwt(userId);
-      const { status, body } = await artClient.prepareCheckout({ tag: probeTag, idTurma: probeTurma, xApiKey, token });
-      if (status === 200 && body?.course) return token;
-    }
-    throw new Error("nenhum carrier conhecido respondeu prepare 200; configure ART_CARRIER_USER_IDS");
-  }
-
   // Lista todas as turmas ativas de uma tag via /v1/services/turmas. Esse endpoint
-  // foi patcheado pela plataforma: REJEITA o carrier alg=none (401) e exige um
-  // token RS256 real de login (ver pesquisa CURSOS-BANCARIOS, art_catalog_full.py).
-  // Por isso recebe o token RS256 da conta do comprador, obtido apos o login.
+  // exige um token RS256 real de login (a plataforma rejeita tokens de transporte),
+  // por isso recebe o RS256 da conta do comprador ou de uma service-account.
   async function listActiveTurmasForTag({ tag, xApiKey, token, onLog = () => {} }) {
     const turmas = await artClient.listAllTurmas({ xApiKey, token, onLog });
     return turmas
@@ -98,15 +111,15 @@ export function createEnrollmentService(artClient, config = {}) {
       .sort(compareTurmaDesc);
   }
 
-  // Filtro oficial de checkout: uma turma so serve se prepareCheckout responder
-  // 200 com course (o carrier alg=none ainda e aceito aqui). Recebe candidatos
-  // (id_turma) e devolve os validos ordenados desc, enriquecidos com o course.
-  async function validateCandidatesViaPrepare({ tag, candidates, xApiKey, carrierToken }) {
+  // Filtro oficial de checkout: uma turma só serve se prepareCheckout responder
+  // 200 com course. O prepare roda SÓ com x-api-key (sem Bearer) — não precisa de
+  // nenhum token de usuário, muito menos alg=none.
+  async function validateCandidatesViaPrepare({ tag, candidates, xApiKey }) {
     const ordered = [...candidates].sort(compareTurmaDesc);
     const valid = [];
     for (const turma of ordered) {
       const idTurma = Number(turma.id_turma);
-      const { status, body } = await artClient.prepareCheckout({ tag, idTurma, xApiKey, token: carrierToken });
+      const { status, body } = await artClient.prepareCheckout({ tag, idTurma, xApiKey });
       if (status === 200 && body?.course) {
         valid.push({
           idTurma,
@@ -119,20 +132,17 @@ export function createEnrollmentService(artClient, config = {}) {
     return valid;
   }
 
-  // Regra de negócio do contrato ART (atualizada em 2026-07-29 pelo Rafael):
-  // matricular na turma MAIS RECENTE com checkout ativo. A lista `valid` já
-  // chega ordenada desc (data de início, depois id) — valid[0] é a mais nova.
+  // Regra de negócio do contrato ART (Rafael, 2026-07-29): matricular na turma
+  // MAIS RECENTE com checkout ativo. `valid` já chega ordenada desc — valid[0].
   function pickVigente(valid) {
-    // Regra do contrato ART (Rafael, 2026-07-29): turma MAIS RECENTE com checkout
-    // ativo. `valid` já chega ordenada desc (data_inicio, depois id) — valid[0].
     const chosen = valid[0];
     return { ...chosen, selectionReason: valid.length >= 2 ? "turma-mais-recente" : "turma-unica", allValid: valid };
   }
 
-  // Varredura de ids via carrier prepare (o alg=none ainda é aceito no prepare).
-  // Recebe faixas [inicio, fim] explícitas — quem decide as faixas é o
-  // discoverTurmasVivas (âncoras + fronteira persistida).
-  async function scanTurmasViaCarrier({ tag, xApiKey, carrierToken, ranges, onLog = () => {} }) {
+  // Varredura de ids via prepare (só x-api-key). Recebe faixas [inicio, fim]
+  // explícitas — quem decide as faixas é o discoverTurmasVivas (âncoras +
+  // fronteira persistida).
+  async function scanTurmasViaPrepare({ tag, xApiKey, ranges, onLog = () => {} }) {
     const ids = new Set();
     for (const range of ranges ?? []) {
       const start = Math.max(1, Math.floor(Number(range?.[0])));
@@ -141,14 +151,14 @@ export function createEnrollmentService(artClient, config = {}) {
     }
     const candidates = [...ids];
     if (!candidates.length) return [];
-    onLog(`[turma] scan carrier: ${candidates.length} candidatos para tag=${tag}`);
+    onLog(`[turma] scan prepare: ${candidates.length} candidatos para tag=${tag}`);
     const valid = [];
     const concurrency = 12;
     for (let start = 0; start < candidates.length; start += concurrency) {
       const batch = candidates.slice(start, start + concurrency);
       const results = await Promise.all(batch.map(async (idTurma) => {
         try {
-          const { status, body } = await artClient.prepareCheckout({ tag, idTurma, xApiKey, token: carrierToken });
+          const { status, body } = await artClient.prepareCheckout({ tag, idTurma, xApiKey });
           if (status === 200 && body?.course) {
             return { idTurma, course: body.course, requiresFinancialInstitution: Boolean(body.financialInstitions), data_inicio: body.course.data_inicio ?? "" };
           }
@@ -158,21 +168,19 @@ export function createEnrollmentService(artClient, config = {}) {
       for (const result of results) if (result) valid.push(result);
     }
     valid.sort(compareTurmaDesc);
-    if (valid.length) onLog(`[turma] scan carrier achou ${valid.length} turma(s) ativa(s): ${valid.map((v) => v.idTurma).join(", ")}`);
+    if (valid.length) onLog(`[turma] scan prepare achou ${valid.length} turma(s) ativa(s): ${valid.map((v) => v.idTurma).join(", ")}`);
     return valid;
   }
 
-  // Descoberta de turmas vivas SEM o login do comprador — é o que mantém o
-  // projeto funcionando quando o cohort do catálogo morre ou a plataforma lança
-  // turma nova. Camadas, da mais dinâmica para a mais bruta:
-  //   1. SERVICE ACCOUNTS (ART_SERVICE_ACCOUNTS): login dedicado → RS256 →
-  //      listagem REAL de /v1/services/turmas → filtro por tag → validação via
-  //      prepare. Tempo real, sem nenhum id hardcoded.
-  //   2. SCAN ADAPTATIVO via carrier: âncoras (cohorts) ±150 + fronteira
-  //      PERSISTIDA por tag (app_settings). Quando acha turma na borda da
-  //      fronteira, estende e grava — a próxima execução já cobre o território
-  //      novo. Sobrevive a lançamento de turmas sem intervenção humana.
-  async function discoverTurmasVivas({ tag, xApiKey, carrierToken, anchors, onLog = () => {} }) {
+  // Descoberta de turmas vivas SEM o login do comprador — mantém o projeto
+  // funcionando quando o cohort do catálogo morre ou a plataforma lança turma
+  // nova. Camadas, da mais dinâmica para a mais bruta:
+  //   1. SERVICE ACCOUNTS (ART_SERVICE_ACCOUNTS): login dedicado → RS256 real →
+  //      listagem de /v1/services/turmas → filtro por tag → validação via prepare.
+  //   2. SCAN ADAPTATIVO via prepare (só x-api-key): âncoras (cohorts) ±150 +
+  //      fronteira PERSISTIDA por tag (app_settings). Quando acha turma na borda,
+  //      estende e grava — a próxima execução já cobre o território novo.
+  async function discoverTurmasVivas({ tag, xApiKey, anchors, onLog = () => {} }) {
     for (const account of serviceAccounts) {
       try {
         const session = await artClient.login(account.email, account.password);
@@ -181,7 +189,7 @@ export function createEnrollmentService(artClient, config = {}) {
           onLog(`[turma] service-account ${account.email}: nenhuma turma ativa listada para tag=${tag}`);
           continue;
         }
-        const valid = await validateCandidatesViaPrepare({ tag, candidates: ativas, xApiKey, carrierToken });
+        const valid = await validateCandidatesViaPrepare({ tag, candidates: ativas, xApiKey });
         if (valid.length) {
           onLog(`[turma] service-account ${account.email}: ${valid.length} turma(s) viva(s) em tempo real: ${valid.map((v) => v.idTurma).join(", ")}`);
           return valid;
@@ -199,7 +207,7 @@ export function createEnrollmentService(artClient, config = {}) {
     const ranges = numericAnchors.map((anchor) => [anchor - 150, anchor + 150]);
     const frontierStart = frontier ?? (numericAnchors.length ? Math.max(...numericAnchors) + 151 : 4130);
     ranges.push([frontierStart, frontierStart + 250]);
-    const valid = await scanTurmasViaCarrier({ tag, xApiKey, carrierToken, ranges, onLog });
+    const valid = await scanTurmasViaPrepare({ tag, xApiKey, ranges, onLog });
     if (valid.length && store?.setSetting) {
       const maxFound = Math.max(...valid.map((v) => v.idTurma));
       const nextFrontier = Math.max(maxFound + 100, frontierStart + 250);
@@ -214,24 +222,24 @@ export function createEnrollmentService(artClient, config = {}) {
   }
 
   // Resolve a turma de PROVISIONAMENTO (roda antes do login, sem RS256). Usa os
-  // candidatos fornecidos (cohort do catalogo / job) e valida via prepare.
-  async function resolveTurma({ tag, candidateTurmas, xApiKey, carrierToken, onLog = () => {} }) {
+  // candidatos fornecidos (cohort do catálogo / job) e valida via prepare.
+  async function resolveTurma({ tag, candidateTurmas, xApiKey, onLog = () => {} }) {
     if (!candidateTurmas?.length) {
       throw new Error(`sem candidatos para tag=${tag}; catalogo sem cohort ou job sem cohort`);
     }
     const candidates = candidateTurmas.map((idTurma) => ({ id_turma: Number(idTurma) }));
-    const valid = await validateCandidatesViaPrepare({ tag, candidates, xApiKey, carrierToken });
+    const valid = await validateCandidatesViaPrepare({ tag, candidates, xApiKey });
     if (!valid.length) throw new Error(`nenhuma turma com checkout ativo para tag=${tag}`);
     const chosen = pickVigente(valid);
     onLog(`[turma] provisao ${chosen.selectionReason}: ${chosen.idTurma} (ultima=${valid[0].idTurma}, total_ativas=${valid.length}, inicio=${chosen.dataInicio})`);
     return chosen;
   }
 
-  // Descoberta DINAMICA e autentica: com o RS256 real do comprador, lista as
-  // turmas da tag em tempo real e valida via prepare. Mantem a turma de
-  // provisionamento se ela continuar ativa (consistencia com a order PENDING ja
-  // criada na fase 1); so troca se ela tiver saido do ar, usando a vigente real.
-  async function refineTurmaDinamica({ tag, turmaProvisao, xApiKey, carrierToken, rs256, onLog = () => {} }) {
+  // Descoberta DINÂMICA e autêntica: com o RS256 real do comprador, lista as
+  // turmas da tag em tempo real e valida via prepare. Mantém a turma de
+  // provisionamento se ela continuar ativa (consistência com a order PENDING já
+  // criada na fase 1); só troca se ela tiver saído do ar, usando a vigente real.
+  async function refineTurmaDinamica({ tag, turmaProvisao, xApiKey, rs256, onLog = () => {} }) {
     let ativas;
     try {
       ativas = await listActiveTurmasForTag({ tag, xApiKey, token: rs256, onLog });
@@ -243,7 +251,7 @@ export function createEnrollmentService(artClient, config = {}) {
       onLog(`[turma] dinamica: nenhuma turma ativa listada para tag=${tag}; mantendo provisao ${turmaProvisao.idTurma}`);
       return turmaProvisao;
     }
-    const valid = await validateCandidatesViaPrepare({ tag, candidates: ativas, xApiKey, carrierToken });
+    const valid = await validateCandidatesViaPrepare({ tag, candidates: ativas, xApiKey });
     if (!valid.length) {
       onLog(`[turma] dinamica: turmas listadas mas nenhuma com checkout ativo; mantendo provisao ${turmaProvisao.idTurma}`);
       return turmaProvisao;
@@ -260,7 +268,7 @@ export function createEnrollmentService(artClient, config = {}) {
 
   // phone/birthDate/address vêm do pedido PULSO (coletados no checkout). Entram
   // no payload quando a conta é provisionada por nós (fase 1) e como fallback
-  // quando o perfil da plataforma está vazio — nunca mais "Rua Test"/"11999999999"
+  // quando o perfil da plataforma está vazio — nunca "Rua Test"/"11999999999"
   // poluindo o cadastro de um cliente real.
   // Orders PENDING ficam invisíveis no findCoursesByStudent — a resposta do
   // findOrdersByStudent tem formato imprevisível (dict aninhado ou lista), então
@@ -334,7 +342,6 @@ export function createEnrollmentService(artClient, config = {}) {
 
   async function enrollStudent({ email, cpf, tag, fullName, phone = null, birthDate = null, address = null, financialInstitution = "", affiliate = "", candidateTurmas = null, onLog = () => {} }) {
     const xApiKey = generateXApiKey();
-    const carrierToken = await discoverCarrierToken(xApiKey);
     const provisionCandidates = candidateTurmas ?? (getCohortBySourceTag(tag) ? [getCohortBySourceTag(tag)] : null);
 
     const payloadDefaults = { phone: defaultPhone, birthDate: defaultBirthDate };
@@ -344,16 +351,15 @@ export function createEnrollmentService(artClient, config = {}) {
       ...(address ?? {}),
     };
 
-    // Fast path: cohort do catálogo validado via prepare com o carrier.
-    // Se o cohort do catálogo está morto (checkout fechado — caso cfp_modular
-    // 3629 em produção, 2026-07-29), NÃO desiste: loga primeiro e descobre as
-    // turmas vivas com o RS256 da conta do comprador.
+    // Fast path: cohort do catálogo validado via prepare (só x-api-key). Se o
+    // cohort do catálogo está morto (checkout fechado), NÃO desiste: descobre as
+    // turmas vivas (service-account RS256 / scan adaptativo via prepare).
     let turmaProvisao = null;
     try {
-      turmaProvisao = await resolveTurma({ tag, candidateTurmas: provisionCandidates, xApiKey, carrierToken, onLog });
+      turmaProvisao = await resolveTurma({ tag, candidateTurmas: provisionCandidates, xApiKey, onLog });
     } catch (error) {
       onLog(`[turma] catalogo sem turma ativa (${String(error).slice(0, 120)}) — descoberta dinamica (service-account/scan adaptativo)`);
-      const discovered = await discoverTurmasVivas({ tag, xApiKey, carrierToken, anchors: provisionCandidates, onLog });
+      const discovered = await discoverTurmasVivas({ tag, xApiKey, anchors: provisionCandidates, onLog });
       if (discovered.length) {
         turmaProvisao = pickVigente(discovered);
         onLog(`[turma] descoberta dinamica resolveu provisao ${turmaProvisao.idTurma} (${turmaProvisao.selectionReason})`);
@@ -367,11 +373,10 @@ export function createEnrollmentService(artClient, config = {}) {
     } catch {
       if (!turmaProvisao) {
         // Conta nova + catálogo morto: sem login não há RS256 para listar turmas.
-        // O único caminho seria o catálogo — falha clara em vez de seguir sem turma.
         onLog("[enroll] conta inexistente e catalogo sem turma ativa — descoberta RS256 impossivel sem login");
         throw new Error(`catalogo sem turma ativa para tag=${tag} e conta nova (sem RS256 para descoberta dinamica)`);
       }
-      onLog("[enroll] conta inexistente -> fase 1: provisionamento via carrier");
+      onLog("[enroll] conta inexistente -> fase 1: provisionamento (so x-api-key, payload fiel)");
       const fiProvisao = financialInstitution || (turmaProvisao.requiresFinancialInstitution ? "998" : "");
       const payload = buildEnrollPayload({
         tag,
@@ -392,7 +397,10 @@ export function createEnrollmentService(artClient, config = {}) {
           postCode: buyerData.postCode ?? "01000000",
         } : {}),
       });
-      const phase1 = await artClient.startCheckoutProcess({ payload, xApiKey, token: carrierToken });
+      // FASE 1 — SEM Bearer: o provisionamento roda só com x-api-key quando o
+      // payload é fiel à SPA. HTTP 500/400 aqui é esperado e ainda assim cria a
+      // conta (senha = CPF) e a order type=free.
+      const phase1 = await artClient.startCheckoutProcess({ payload, xApiKey });
       onLog(`[enroll] fase1 HTTP ${phase1.status} (500/400 podem ser normais no provisionamento)`);
       const deadline = Date.now() + provisionTimeoutMs;
       while (Date.now() < deadline && !session) {
@@ -400,31 +408,30 @@ export function createEnrollmentService(artClient, config = {}) {
         try { session = await artClient.login(email, cpf); } catch { session = null; }
       }
       if (!session) throw new Error("conta nao provisionou em 120s");
-      onLog(`[enroll] conta provisionada user_id=${session.userId}`);
+      onLog(`[enroll] conta provisionada user_id=${session.userId} (senha=CPF confirmada pelo login)`);
     }
 
-    // Catálogo morto + conta existente: descoberta autenticada das turmas vivas
-    // com o RS256 do comprador (o carrier alg=none não lista /services/turmas
-    // desde o patch da plataforma). Valida via prepare e escolhe a vigente.
+    // Catálogo morto + conta existente: descoberta autêntica das turmas vivas
+    // com o RS256 do comprador. Valida via prepare e escolhe a vigente.
     if (!turmaProvisao) {
       const ativas = await listActiveTurmasForTag({ tag, xApiKey, token: session.token, onLog });
-      const valid = await validateCandidatesViaPrepare({ tag, candidates: ativas, xApiKey, carrierToken });
+      const valid = await validateCandidatesViaPrepare({ tag, candidates: ativas, xApiKey });
       if (!valid.length) throw new Error(`nenhuma turma com checkout ativo para tag=${tag} mesmo via descoberta RS256`);
       turmaProvisao = pickVigente(valid);
       onLog(`[turma] descoberta-RS256 resolveu provisao ${turmaProvisao.idTurma} (fallback de catalogo morto, ultima=${valid[0].idTurma}, total=${valid.length})`);
     }
 
     // Com o RS256 real do comprador, confirma/ajusta a turma dinamicamente.
-    const turma = await refineTurmaDinamica({ tag, turmaProvisao, xApiKey, carrierToken, rs256: session.token, onLog });
+    const turma = await refineTurmaDinamica({ tag, turmaProvisao, xApiKey, rs256: session.token, onLog });
     const idTurma = turma.idTurma;
     const resolvedFinancialInstitution = financialInstitution || (turma.requiresFinancialInstitution ? "998" : "");
     onLog(`[enroll] inicio email=${email} tag=${tag} turma=${idTurma} (${turma.selectionReason}) fi=${resolvedFinancialInstitution || "-"}`);
 
-    // Identidade alinhada ao perfil JA REGISTRADO na plataforma: o documento do
-    // aluno manda no payload. Caso real (producao, 2026-07-29): conta criada com
-    // um CPF e pedido posterior com outro -> fase2 respondia 500 "Ops" ate o
-    // payload bater com o documento do perfil. O CPF do pedido so vale quando a
-    // conta acabou de ser provisionada por nos (fase 1, sem perfil anterior).
+    // Identidade alinhada ao perfil JÁ REGISTRADO na plataforma: o documento do
+    // aluno manda no payload. Caso real (produção, 2026-07-29): conta criada com
+    // um CPF e pedido posterior com outro -> fase2 respondia 500 "Ops" até o
+    // payload bater com o documento do perfil. O CPF do pedido só vale quando a
+    // conta acabou de ser provisionada por nós (fase 1, sem perfil anterior).
     const digitsOnly = (value) => String(value ?? "").replace(/\D/g, "") || null;
     let platformProfile = null;
     try {
@@ -432,9 +439,6 @@ export function createEnrollmentService(artClient, config = {}) {
       if (found.status === 200 && found.body && typeof found.body === "object") platformProfile = found.body;
     } catch { /* sonda tolerante: segue com os dados do pedido */ }
     const platformDocument = digitsOnly(platformProfile?.documento);
-    // Prioridade de cada variável: perfil da plataforma > dados do pedido PULSO
-    // > defaults de pesquisa. Garante que cliente novo nasce com dados reais e
-    // cliente antigo não colide com o que já está registrado na plataforma.
     const identity = {
       cpf: platformDocument ?? cpf,
       fullName: [platformProfile?.nome, platformProfile?.sobre_nome].filter(Boolean).join(" ").trim() || fullName,
@@ -473,13 +477,14 @@ export function createEnrollmentService(artClient, config = {}) {
       complement: identity.complement,
       affiliate,
     });
+    // FASE 2 — com o RS256 real do comprador (sub == user_id do email): efetiva
+    // a order. HTTP 400 "pagamento sendo processado" = order PENDING já existe.
     const phase2 = await artClient.startCheckoutProcess({ payload, xApiKey, token: session.token });
     onLog(`[enroll] fase2 HTTP ${phase2.status}: ${String(phase2.text ?? "").slice(0, 180)}`);
 
     const pending = phase2.status === 400 || phase2.status === 500;
     // Se outra sessão da mesma conta logar (instância concorrente, operador na
-    // plataforma), a nossa morre (401). Renova aqui dentro da MESMA tentativa
-    // em vez de derrubar o retry inteiro — re-login é barato, perder a ordem não.
+    // plataforma), a nossa morre (401). Renova aqui dentro da MESMA tentativa.
     const relogin = async () => {
       try {
         session = await artClient.login(email, cpf);
@@ -507,9 +512,9 @@ export function createEnrollmentService(artClient, config = {}) {
     if (!wait.enrollment) {
       // Order PENDING zumbi: invisível no findCoursesByStudent, bloqueia re-enroll
       // (400) e espera um flip assíncrono que pode nunca vir. Caminho determinístico
-      // validado na pesquisa (art_unenroll_all.py): achar a order PENDING da
-      // tag/turma via findOrdersByStudent, DELETAR e re-enviar o enroll limpo —
-      // a nova order type=free nasce APPROVED na hora.
+      // validado na pesquisa: achar a order PENDING da tag/turma via
+      // findOrdersByStudent, DELETAR e re-enviar o enroll limpo — a nova order
+      // type=free nasce APPROVED na hora.
       const recovery = await recoverStuckPendingOrder({
         tag,
         idTurma,
@@ -539,5 +544,5 @@ export function createEnrollmentService(artClient, config = {}) {
     return body;
   }
 
-  return Object.freeze({ enrollStudent, listStudentCourses, resolveTurma, listActiveTurmasForTag, discoverCarrierToken });
+  return Object.freeze({ enrollStudent, listStudentCourses, resolveTurma, listActiveTurmasForTag });
 }

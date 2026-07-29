@@ -19,7 +19,7 @@ function artPlatformMock({ dynamicTurmas, activeOnPrepare = new Set() } = {}) {
     if (path === "/v1/checkout/prepare") {
       const tag = u.searchParams.get("tag");
       const idTurma = u.searchParams.get("id_turma");
-      // probe do carrier (cpa2026/4058) sempre responde; demais so se ativos
+      // cpa2026/4058 sempre responde; demais so se ativos
       if (tag === "cpa2026" && idTurma === "4058") return json({ course: { tag_curso: tag, nome: "CPA", valor_curso: 1500 } });
       if (activeOnPrepare.has(`${tag}:${idTurma}`)) {
         return json({ course: { tag_curso: tag, nome: "Curso", valor_curso: 9997, data_fim_vendas: "2026-09-18" }, financialInstitions: [{ id: 998 }] });
@@ -56,7 +56,6 @@ test("resolveTurma escolhe a turma mais recente com checkout ativo (regra do con
     tag: "cfp-2026_54",
     candidateTurmas: [4099, 4101],
     xApiKey: "qualquer",
-    carrierToken: "qualquer",
     onLog: (line) => logs.push(line),
   });
   assert.equal(turma.idTurma, 4101, "regra vigente: a turma MAIS RECENTE vence");
@@ -255,6 +254,77 @@ test("enrollStudent: provisiona conta nova com os dados reais do comprador", asy
   assert.equal(phase1Payload.post_code, "01310930");
 });
 
+test("enrollStudent: payload de provisão é FIEL à SPA (card RSA, detailsCupom objeto, fingerprint) e a fase 1 roda sem Bearer", async () => {
+  // O coração da elevação (pesquisa 2026-07-29, JWT real): o provisionamento
+  // (fase 1) roda SÓ com x-api-key — sem Bearer, sem nenhum token alg=none — e o
+  // payload precisa ser fiel à SPA: cartão cifrado RSA em chunks de 100 chars,
+  // detailsCupom objeto, getnet_fingerprint, promo_opt_in, contract:true.
+  // Payloads "pobres" (card:"", detailsCupom:"") crasham antes de provisionar.
+  const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
+  let logins = 0;
+  let phase1 = null;
+  let phase1Headers = null;
+  const dynamicTurmas = [
+    { id_turma: 4155, tag_curso: "cfp-2026_54", nome: "10 anos", ativa: 1, data_inicio_aulas: "2026-07-02" },
+  ];
+  async function handler(url, options = {}) {
+    const u = new URL(url);
+    const path = u.pathname;
+    if (path === "/api/login") {
+      logins += 1;
+      if (logins === 1) return json({ response: { status: "ERROR", message: "credenciais invalidas" } });
+      return json({ response: { status: "SUCCESS", data: { token: "rs256-real-do-aluno", id: 11833 } } });
+    }
+    if (path === "/v1/checkout/prepare") return json({ course: { tag_curso: "cfp-2026_54", nome: "Curso", valor_curso: 9997 } });
+    if (path === "/v1/services/turmas") return json({ current_page: 1, last_page: 1, data: dynamicTurmas });
+    if (path === "/v1/checkout/findStudent") return json({ error: "not found" }, 404);
+    if (path === "/v1/services/student/metrics") return json({}, 405);
+    if (path === "/v1/checkout/process/start") {
+      phase1 ??= JSON.parse(String(options.body ?? "{}"));
+      phase1Headers ??= options.headers;
+      return json({ error: "Ops!" }, 500);
+    }
+    if (path === "/v1/services/aluno/findCoursesByStudent") {
+      const auth = options.headers?.Authorization ?? options.headers?.authorization ?? "";
+      if (auth !== "Bearer rs256-real-do-aluno") return json({ message: "Unauthenticated." }, 401);
+      return json([{ tag: "cfp-2026_54", status: "APPROVED", id_turma: 4155 }]);
+    }
+    return json({ error: "not found" }, 404);
+  }
+  const client = createArtClient({ pollIntervalMs: 1, pollTimeoutMs: 8000 }, handler);
+  const service = createEnrollmentService(client, { provisionTimeoutMs: 20_000 });
+
+  const result = await service.enrollStudent({
+    email: "fiel@example.com",
+    cpf: "19100000000",
+    tag: "cfp-2026_54",
+    fullName: "Payload Fiel",
+    onLog: () => {},
+  });
+
+  assert.equal(result.status, "CONFIRMED");
+  assert.ok(phase1, "fase 1 enviou payload");
+  // tipo gratuito + flags fiéis à SPA
+  assert.equal(phase1.type, "free");
+  assert.equal(phase1.contract, true);
+  assert.equal(phase1.contractPrivacity, true);
+  assert.equal(phase1.promo_opt_in, false);
+  // detailsCupom é OBJETO (não a string vazia do payload pobre)
+  assert.deepEqual(phase1.detailsCupom, { valid: false, cashValue: 0, value: 0 });
+  // getnet_fingerprint presente (32 hex)
+  assert.match(phase1.getnet_fingerprint, /^[0-9a-f]{32}$/);
+  // card é string JSON de array de chunks RSA-1024 (cada chunk decodifica p/ 128 bytes)
+  assert.equal(typeof phase1.card, "string");
+  const chunks = JSON.parse(phase1.card);
+  assert.ok(Array.isArray(chunks) && chunks.length >= 1, "card é array de chunks cifrados");
+  for (const chunk of chunks) {
+    assert.equal(Buffer.from(chunk, "base64").length, 128, "cada chunk é RSA-1024 (128 bytes)");
+  }
+  // FASE 1 sem Bearer: provisionamento só com x-api-key (sem alg=none, sem RS256)
+  const auth = phase1Headers?.Authorization ?? phase1Headers?.authorization;
+  assert.equal(auth, undefined, "fase 1 NÃO envia Authorization (provisionamento só com x-api-key)");
+});
+
 test("enrollStudent: cohort morto + scan vazio → descoberta RS256 da conta resolve", async () => {
   // Última camada dinâmica: catálogo morto, scan adaptativo não alcança a turma
   // (id fora das faixas), mas a conta do comprador existe → listagem RS256 real.
@@ -411,11 +481,12 @@ test("enrollStudent: order PENDING zumbi é deletada e o re-enroll nasce APPROVE
   assert.ok(logs.some((l) => l.includes("DELETE order 9990001")), logs.join("\n"));
 });
 
-test("enrollStudent: conta nova + cohort morto — scan carrier acha a turma viva e provisiona", async () => {
+test("enrollStudent: conta nova + cohort morto — scan prepare acha a turma viva e provisiona", async () => {
   // Caso cfp_modular_12345678 (produção 2026-07-29): cohort do catálogo morto
   // (3629 → 404) e comprador sem conta na plataforma (login falha → sem RS256
-  // para listar turmas). O scan via carrier prepare varre a faixa do cohort e
-  // encontra a turma viva (3776), permitindo provisionar a conta.
+  // para listar turmas). O scan via prepare (só x-api-key, sem nenhum token
+  // alg=none) varre a faixa do cohort e encontra a turma viva (3776),
+  // permitindo provisionar a conta.
   const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
   let logins = 0;
   let enrollCalls = 0;
@@ -470,8 +541,8 @@ test("enrollStudent: conta nova + cohort morto — scan carrier acha a turma viv
   });
 
   assert.equal(result.status, "CONFIRMED");
-  assert.equal(result.idTurma, 3776, "turma viva descoberta pelo scan carrier");
-  assert.ok(logs.some((l) => l.includes("scan carrier achou 1 turma(s) ativa(s): 3776")), logs.join("\n"));
+  assert.equal(result.idTurma, 3776, "turma viva descoberta pelo scan prepare");
+  assert.ok(logs.some((l) => l.includes("scan prepare achou 1 turma(s) ativa(s): 3776")), logs.join("\n"));
   assert.deepEqual(settingsWrites[0], ["art-scan-frontier:cfp_modular_12345678", 4030], "fronteira persistida para a proxima execucao");
 });
 
@@ -574,8 +645,9 @@ test("enrollStudent: alinha o documento ao perfil ja registrado na plataforma (m
   assert.ok(logs.some((l) => l.includes("DIFERENTE do pedido")), logs.join("\n"));
 });
 
-test("enrollStudent: sem conta de serviço, a listagem com carrier alg=none é rejeitada (401) mas o fluxo segue via cohort", async () => {
-  // dynamicTurmas vazio simula listagem dinâmica indisponível; cohort 4155 ainda ativa.
+test("enrollStudent: sem conta de serviço e listagem dinâmica vazia, o fluxo segue via cohort", async () => {
+  // dynamicTurmas vazio simula listagem dinâmica indisponível (o RS256 do
+  // comprador não lista turmas ativas para a tag); cohort 4155 ainda ativa.
   const mock = artPlatformMock({
     dynamicTurmas: [],
     activeOnPrepare: new Set(["cfp-2026_54:4155"]),
