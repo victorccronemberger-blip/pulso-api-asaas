@@ -9,7 +9,6 @@ import { createAsaasWebhookHandler } from "./routes/asaas-integration.js";
 import { createCheckoutRouter } from "./routes/checkout.js";
 import { createHealthRouter } from "./routes/health.js";
 import { createAdminRouter, createPublicCommerceRouter } from "./routes/admin.js";
-import { createAdminConsoleRouter } from "./routes/admin-console.js";
 import { createCustomerRouter } from "./routes/customer.js";
 import { createInMemoryStore } from "./admin/in-memory-store.js";
 import { createMySqlStore } from "./admin/mysql-store.js";
@@ -91,6 +90,11 @@ export function createApp(overrides = {}, dependencies = {}) {
   }));
   app.use(express.json({ limit: "32kb" }));
 
+  const adminPanelUrl = new URL("/admin/", environment.adminOrigin).toString();
+  app.get(["/admin", "/admin/"], (_request, response) => {
+    response.redirect(308, adminPanelUrl);
+  });
+
   app.use("/health", createHealthRouter(express, environment, readiness, waitForReady));
   app.use(async (_request, response, next) => {
     await waitForReady();
@@ -119,7 +123,6 @@ export function createApp(overrides = {}, dependencies = {}) {
   }));
   app.use("/v1/admin", createAdminRouter(express, { environment, store, queue: artIntegration?.queue }));
   app.use("/v1/public", createPublicCommerceRouter(express, { store }));
-  app.use("/admin", createAdminConsoleRouter(express));
 
   app.use((_request, response) => {
     response.status(404).json({

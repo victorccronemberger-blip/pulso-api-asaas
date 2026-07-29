@@ -92,6 +92,16 @@ test("production refuses the non-persistent fallback", () => {
   assert.throws(() => createApp({ NODE_ENV: "production", PORT: "3102" }), /MYSQL_URL is required/);
 });
 
+test("redirects the retired API admin console to the single frontend panel", async (context) => {
+  const { base } = await api(context);
+  const response = await fetch(`${base}/admin/`, { redirect: "manual" });
+  assert.equal(response.status, 308);
+  assert.equal(response.headers.get("location"), "https://pulso.cyara.com.br/admin/");
+
+  const protectedApi = await fetch(`${base}/v1/admin/session`);
+  assert.equal(protectedApi.status, 401);
+});
+
 test("reconciles a paid webhook that arrives before local order enrichment", async () => {
   const store = createInMemoryStore();
   const attemptKey = "a0000000-0000-4000-8000-000000000088";
