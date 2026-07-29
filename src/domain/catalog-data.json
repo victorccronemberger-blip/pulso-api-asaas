@@ -726,7 +726,8 @@
       "cfp",
       "kit",
       "material"
-    ]
+    ],
+    "active": false
   },
   {
     "slug": "kit-cfp-54",
@@ -744,7 +745,8 @@
       "cfp",
       "kit",
       "exame 54"
-    ]
+    ],
+    "active": false
   },
   {
     "slug": "mastermind-art",
