@@ -105,6 +105,16 @@ export function createAdminRouter(express, { environment, store, queue }) {
     if (outcome.found) await audit(request, "enrollment.verify", "enrollment", request.params.id, { found: true });
     return response.json(outcome);
   });
+  // Cancelamento de matrícula (reembolso): deleta as orders na plataforma ART
+  // e marca o enrollment como cancelled. O botão no painel chama este endpoint.
+  router.post("/enrollments/:id/cancel", requireAdmin, requireCsrf, async (request, response) => {
+    if (!queue?.cancelEnrollment) return response.status(503).json({ error: "enrollment_unavailable", message: "A integração de matrículas ainda não está disponível." });
+    const outcome = await queue.cancelEnrollment(request.params.id);
+    if (!outcome) return response.status(404).json({ error: "enrollment_not_found" });
+    if (!outcome.cancelled) return response.status(409).json({ error: "cancel_not_run", message: "O cancelamento não pode rodar agora.", ...outcome });
+    await audit(request, "enrollment.cancel", "enrollment", request.params.id, { deleted: outcome.deleted, tags: outcome.tags });
+    return response.json(outcome);
+  });
   router.post("/course-activations", requireAdmin, requireCsrf, async (request, response) => {
     if (!queue?.enqueueManualActivation) return response.status(503).json({ error: "enrollment_unavailable", message: "A integração de matrículas ainda não está disponível." });
     let input;

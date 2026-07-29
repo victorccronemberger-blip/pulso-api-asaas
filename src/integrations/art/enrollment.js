@@ -572,5 +572,49 @@ export function createEnrollmentService(artClient, config = {}) {
     return body;
   }
 
-  return Object.freeze({ enrollStudent, listStudentCourses, resolveTurma, listActiveTurmasForTag });
+  // Cancela a matrícula de um aluno na plataforma ART: localiza as orders da tag
+  // via findCoursesByStudent e deleta cada uma (soft-delete, body "1"). Retorna
+  // { deleted: number, tags: string[] } com o que foi removido.
+  async function cancelStudentCourse({ email, cpf, tag, onLog = () => {} }) {
+    const xApiKey = generateXApiKey();
+    onLog(`[cancel] login ${email}`);
+    const session = await artClient.login(email, cpf);
+    const { status, body } = await artClient.findCoursesByStudent({ email, xApiKey, token: session.token });
+    if (status !== 200 || !Array.isArray(body)) {
+      throw new Error(`findCoursesByStudent HTTP ${status}: ${String(body).slice(0, 300)}`);
+    }
+    const matching = body.filter((course) => course?.tag === tag);
+    if (!matching.length) {
+      onLog(`[cancel] nenhum curso encontrado para tag=${tag}`);
+      return { deleted: 0, tags: [] };
+    }
+    const deletedTags = [];
+    for (const course of matching) {
+      const orderId = course.id_order ?? course.idOrder;
+      if (!orderId) continue;
+      const del = await artClient.deleteOrder({ idOrder: orderId, xApiKey, token: session.token });
+      const ok = del.status === 200 && String(del.text ?? "").trim() === "1";
+      onLog(`[cancel] DELETE order ${orderId} (tag=${course.tag}) -> HTTP ${del.status}${ok ? " OK" : " FALHOU"}`);
+      if (ok) deletedTags.push(course.tag);
+    }
+    // segunda passada: orders bundled que aparecem após o delete das principais
+    if (deletedTags.length) {
+      const recheck = await artClient.findCoursesByStudent({ email, xApiKey, token: session.token });
+      if (recheck.status === 200 && Array.isArray(recheck.body)) {
+        for (const course of recheck.body.filter((c) => c?.tag === tag)) {
+          const orderId = course.id_order ?? course.idOrder;
+          if (!orderId) continue;
+          const del = await artClient.deleteOrder({ idOrder: orderId, xApiKey, token: session.token });
+          if (del.status === 200 && String(del.text ?? "").trim() === "1") {
+            onLog(`[cancel] DELETE order bundled ${orderId} (tag=${course.tag}) -> OK`);
+            if (!deletedTags.includes(course.tag)) deletedTags.push(course.tag);
+          }
+        }
+      }
+    }
+    onLog(`[cancel] ${deletedTags.length} order(s) deletada(s) para tag=${tag}`);
+    return { deleted: deletedTags.length, tags: deletedTags };
+  }
+
+  return Object.freeze({ enrollStudent, listStudentCourses, cancelStudentCourse, resolveTurma, listActiveTurmasForTag });
 }

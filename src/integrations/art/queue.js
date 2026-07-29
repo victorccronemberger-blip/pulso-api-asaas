@@ -213,6 +213,39 @@ export function createEnrollmentQueue({ store, enrollmentService, environment, l
     return { checked: true, found: true, enrollment: await store.getEnrollmentJob(job.id) };
   }
 
+  // Cancelamento de matrícula (reembolso): deleta as orders na ART e marca o
+  // job local como cancelled. Nunca roda em job queued/processing.
+  async function cancelEnrollment(enrollmentId) {
+    const job = await store.getEnrollmentJob(enrollmentId);
+    if (!job) return null;
+    if (["queued", "processing"].includes(job.status)) {
+      return { cancelled: false, reason: "job_in_progress", enrollment: job };
+    }
+    if (!job.buyerEmail || !job.buyerCpf) {
+      return { cancelled: false, reason: "missing_buyer_data", enrollment: job };
+    }
+    let result;
+    try {
+      result = await enrollmentService.cancelStudentCourse({
+        email: job.buyerEmail,
+        cpf: job.buyerCpf,
+        tag: job.sourceTag,
+        onLog: (line) => log(`${new Date().toISOString()} [cancel:${job.id}] ${line}`),
+      });
+    } catch (error) {
+      return { cancelled: false, reason: String(error).slice(0, 300), enrollment: job };
+    }
+    await store.finishEnrollmentJob(job.id, {
+      status: "cancelled",
+      idTurma: job.idTurma ?? null,
+      turmaSelection: job.turmaSelection ?? null,
+      userId: job.userId ?? null,
+      result: { cancelledBy: "admin", ...result },
+    });
+    log(`[cancel:${job.id}] cancelled — ${result.deleted} order(s) deletada(s) na ART`);
+    return { cancelled: true, deleted: result.deleted, tags: result.tags, enrollment: await store.getEnrollmentJob(job.id) };
+  }
+
   async function start() {
     const recovered = await store.recoverStaleEnrollments();
     if (recovered) log(`[enrollment] recovered ${recovered} stale job(s) from previous run`);
@@ -241,6 +274,7 @@ export function createEnrollmentQueue({ store, enrollmentService, environment, l
     enqueueOrder,
     enqueueManualActivation,
     verifyEnrollment,
+    cancelEnrollment,
     start,
     shutdown,
     status,
