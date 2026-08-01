@@ -479,6 +479,10 @@ export function createMySqlStore(databaseUrl) {
     },
     async getSetting(key) { await ensureSchema(); const [[row]]=await pool.query("SELECT setting_value FROM app_settings WHERE setting_key=?", [key]); return row ? fromJson(row.setting_value, null) : null; },
     async setSetting(key, value) { await ensureSchema(); await pool.query("INSERT INTO app_settings (setting_key, setting_value) VALUES (?,?) ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)", [key, JSON.stringify(value ?? null)]); },
+    // Self-healing de cohort: o motor ART descobre a turma viva ao ativar e, se
+    // ela divergir do cohort gravado no catálogo, atualiza a tabela products para
+    // manter o banco sincronizado sem manutenção manual (2026-08-01).
+    async updateProductCohortBySourceTag(sourceTag, cohort) { await ensureSchema(); await pool.query("UPDATE products SET cohort=? WHERE source_tag=?", [String(cohort), sourceTag]); },
     async getCampaign() { await ensureSchema(); const [[row]]=await pool.query("SELECT setting_value FROM app_settings WHERE setting_key='campaign'"); return fromJson(row?.setting_value, {activeCouponCode:null,headline:null}); },
     async saveCampaign(value) { await ensureSchema(); const next={...(await this.getCampaign()),...value}; await pool.query("INSERT INTO app_settings (setting_key,setting_value) VALUES ('campaign',?) ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)",[asJson(next)]); return next; },
     async audit(entry) { await ensureSchema(); await pool.query("INSERT INTO admin_audit_log (id,admin_id,action,entity_type,entity_id,metadata_json) VALUES (?,?,?,?,?,?)",[id(),entry.adminId??null,entry.action,entry.entityType,entry.entityId??null,JSON.stringify(entry.metadata??{})]); },

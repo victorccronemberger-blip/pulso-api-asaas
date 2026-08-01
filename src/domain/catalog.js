@@ -44,6 +44,19 @@ export function getSourceTag(slug) { return sourceTagBySlug.get(slug) ?? null; }
 export function getCohort(slug) { return cohortBySlug.get(slug) ?? null; }
 export function getCohortBySourceTag(sourceTag) { return cohortBySourceTag.get(sourceTag) ?? null; }
 
+// Self-healing de cohort em memória (2026-08-01): o motor ART descobre a turma
+// viva ao ativar; quando ela diverge do cohort gravado, atualiza o catálogo em
+// memória + o banco (via store.updateProductCohortBySourceTag) para o cohort
+// nunca ficar stale entre reboots.
+export function syncCohortBySourceTag(sourceTag, cohort) {
+  const value = String(cohort ?? "").trim();
+  if (!value || !sourceTag) return;
+  cohortBySourceTag.set(sourceTag, value);
+  for (const [slug, tag] of sourceTagBySlug) {
+    if (tag === sourceTag) cohortBySlug.set(slug, value);
+  }
+}
+
 // Turmas de COMBO/derivadas por sourceTag (VETOR E da pesquisa Metodos-Toro
 // 2026-08-01). O app do aluno (findCoursesByStudent) só lista o curso quando o
 // id_turma da order pertence ao catálogo vigente — e para alguns cursos a turma

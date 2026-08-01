@@ -843,3 +843,46 @@ test("enrollStudent: flip acha a order usando PROFILE_ID do login (real ms-idm n
   assert.ok(updateCalls.length >= 1, "flip fez POST na order");
   assert.ok(logs.some((l) => l.includes("[flip] POST order 9003003")), logs.join("\n"));
 });
+
+test("enrollStudent: auto-sync atualiza o cohort do catalogo com a turma viva (self-healing)", async () => {
+  // O seed do catálogo grava cfp-2026_54 com cohort 4155; o motor descobre a
+  // turma viva 9999 (divergente). Deve atualizar o banco
+  // (store.updateProductCohortBySourceTag) e o catálogo em memória para manter
+  // tudo sincronizado sem manutenção manual.
+  const cohortUpdates = [];
+  const store = {
+    updateProductCohortBySourceTag: async (sourceTag, cohort) => cohortUpdates.push({ sourceTag, cohort }),
+  };
+  const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
+
+  async function handler(url, options = {}) {
+    const u = new URL(url);
+    const path = u.pathname;
+    if (path === "/api/login") return json({ response: { status: "SUCCESS", data: { token: "rs256-real", id: 204999, id_usuario: 123456 } } });
+    if (path === "/v1/checkout/prepare") return json({ course: { id_curso: 1738, tag_curso: "cfp-2026_54", nome: "CFP", valor_curso: 9997 } });
+    if (path === "/v1/services/turmas") return json({ current_page: 1, last_page: 1, data: [{ id_turma: 9999, tag_curso: "cfp-2026_54", ativa: 1, data_inicio_aulas: "2026-07-02" }] });
+    if (path === "/v1/services/student/metrics") return json({}, 405);
+    if (path === "/v1/checkout/findStudent") return json({ id_usuario: 123456, nome: "Cliente", documento: "19100000000" });
+    if (path === "/v1/checkout/process/start") return json({ ok: true }, 200);
+    if (path === "/v1/services/aluno/findCoursesByStudent") return json([{ tag: "cfp-2026_54", status: "APPROVED", id_turma: 9999, valor: 0 }]);
+    return json({ error: "not found" }, 404);
+  }
+
+  const client = createArtClient({ pollIntervalMs: 1, pollTimeoutMs: 2000 }, handler);
+  const service = createEnrollmentService(client, { provisionTimeoutMs: 2000, serviceAccounts: [], store });
+  const logs = [];
+  const result = await service.enrollStudent({
+    email: "cohortsync@example.com",
+    cpf: "19100000000",
+    tag: "cfp-2026_54",
+    fullName: "Cliente Cohort",
+    onLog: (line) => logs.push(line),
+  });
+
+  assert.equal(result.status, "CONFIRMED");
+  // cohort do catálogo era 4155 (seed), turma viva 9999 → deve sincronizar.
+  assert.ok(cohortUpdates.length >= 1, "store.updateProductCohortBySourceTag deve ser chamado");
+  assert.equal(cohortUpdates[0].sourceTag, "cfp-2026_54");
+  assert.equal(cohortUpdates[0].cohort, "9999");
+  assert.ok(logs.some((l) => l.includes("[cohort] auto-sync")), logs.join("\n"));
+});

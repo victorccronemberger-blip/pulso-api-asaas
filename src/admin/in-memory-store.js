@@ -132,6 +132,11 @@ export function createInMemoryStore({ catalogProducts = [] } = {}) {
     },
     async getSetting(key) { return settings.has(key) ? copy(settings.get(key)) : null; },
     async setSetting(key, value) { settings.set(key, copy(value ?? null)); },
+    async updateProductCohortBySourceTag(sourceTag, cohort) {
+      for (const product of products.values()) {
+        if (product.sourceTag === sourceTag) product.cohort = String(cohort);
+      }
+    },
     async getCampaign() { return copy(campaign); }, async saveCampaign(next) { campaign = { ...campaign, ...next }; return copy(campaign); },
     async audit(entry) { audits.unshift({ id: randomUUID(), ...entry, createdAt: now() }); },
     async overview() {

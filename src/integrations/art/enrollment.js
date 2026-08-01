@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { randomBytes } from "node:crypto";
 import { encryptCard, generateXApiKey } from "./credentials.js";
-import { getCohortBySourceTag } from "../../domain/catalog.js";
+import { getCohortBySourceTag, syncCohortBySourceTag } from "../../domain/catalog.js";
 
 // ============================================================================
 // MOTOR DE ATIVACAO AUTOMATICA — REESCRITA 2026-08-01
@@ -668,6 +668,24 @@ export function createEnrollmentService(artClient, config = {}) {
     const idTurma = turma.idTurma;
     const resolvedFinancialInstitution = financialInstitution || (turma.requiresFinancialInstitution ? "998" : "");
     onLog(`[enroll] inicio email=${email} tag=${tag} turma=${idTurma} (${turma.selectionReason}) fi=${resolvedFinancialInstitution || "-"}`);
+
+    // Self-healing de cohort (2026-08-01): o motor descobriu a turma viva real;
+    // se ela divergir do cohort gravado no catálogo, atualiza o banco (products)
+    // e o catálogo em memória para manter tudo sincronizado sem manutenção
+    // manual — e para o scan adaptativo da próxima ativação começar perto do
+    // alvo. Best-effort: nunca bloqueia nem falha a ativação se o update der erro.
+    const cohortGravado = getCohortBySourceTag(tag);
+    if (cohortGravado && Number(cohortGravado) !== Number(idTurma)) {
+      syncCohortBySourceTag(tag, String(idTurma));
+      if (store?.updateProductCohortBySourceTag) {
+        try {
+          await store.updateProductCohortBySourceTag(tag, String(idTurma));
+          onLog(`[cohort] auto-sync: products.source_tag=${tag} cohort ${cohortGravado} -> ${idTurma} (turma viva descoberta ao vivo)`);
+        } catch (error) {
+          onLog(`[cohort] auto-sync falhou (best-effort): ${String(error).slice(0, 120)}`);
+        }
+      }
+    }
 
     // Identidade alinhada ao perfil da plataforma (documento real manda).
     let platformProfile = platformAccount?.profile ?? null;
