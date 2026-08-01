@@ -1,5 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { getSourceTag } from "../../domain/catalog.js";
+import { getSourceTag, getComboTurmas } from "../../domain/catalog.js";
 
 const STATUS_BY_RESULT = { CONFIRMED: "confirmed", PENDING: "pending", NOT_CREATED: "not_created" };
 
@@ -34,6 +34,7 @@ export function createEnrollmentQueue({ store, enrollmentService, environment, l
       phone: job.buyerPhone ?? null,
       birthDate: job.buyerBirthDate ?? null,
       address: job.buyerAddress ?? null,
+      comboTurmas: getComboTurmas(job.sourceTag),
       onLog: (line) => { beat(); log(`${new Date().toISOString()} [enrollment:${job.id}] ${line}`); },
     });
   }

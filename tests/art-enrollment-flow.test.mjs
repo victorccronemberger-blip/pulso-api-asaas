@@ -668,3 +668,178 @@ test("enrollStudent: sem conta de serviço e listagem dinâmica vazia, o fluxo s
   assert.equal(result.status, "CONFIRMED");
   assert.equal(result.idTurma, 4155, "fallback: mantém a provisão por cohort quando a dinâmica não lista nada");
 });
+
+test("enrollStudent: order DENIED é resolvida via FLIP (POST /v1/crud/orders/{id}) — VETOR C", async () => {
+  // Cenário: o job NEGOU o type=free (order DENIED com valor real). O polling
+  // não acha o curso; o recoverStuckPendingOrder (delete+re-enroll) também não
+  // resolveria (o re-enroll nasceria DENIED de novo). O novo caminho faz o
+  // POST em /v1/crud/orders/{id} -> APPROVED + valor 0 + id_turma vigente.
+  const updateCalls = [];
+  let findOrdersSeen = 0;
+  const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
+
+  async function handler(url, options = {}) {
+    const u = new URL(url);
+    const path = u.pathname;
+    if (path === "/api/login") return json({ response: { status: "SUCCESS", data: { token: "rs256-real", id: 204999, id_usuario: 123456 } } });
+    if (path === "/v1/checkout/prepare") {
+      if (u.searchParams.get("id_turma") === "4155") return json({ course: { id_curso: 1738, tag_curso: "cfp-2026_54", nome: "CFP", valor_curso: 9997 } });
+      return json({ error: "Course not found" }, 404);
+    }
+    if (path === "/v1/services/turmas") return json({ current_page: 1, last_page: 1, data: [{ id_turma: 4155, tag_curso: "cfp-2026_54", ativa: 1, data_inicio_aulas: "2026-07-02" }] });
+    if (path === "/v1/services/student/metrics") return json({}, 405);
+    if (path === "/v1/checkout/findStudent") return json({ id_usuario: 123456, nome: "Cliente", documento: "19100000000" });
+    if (path === "/v1/services/student/tests") return json({}, 405);
+    if (path === "/v1/checkout/process/start") return json({ ok: true }, 500); // fase 2 devolve 500 (order DENIED oculta)
+    if (path === "/v1/services/aluno/findOrdersByStudent") {
+      findOrdersSeen += 1;
+      return json({ data: [{ id_order: 9001001, id_usuario: 123456, curso: "cfp-2026_54", id_curso: 1738, status: "DENIED", valor: "9997.00", id_cart: 7007, id_turma: 4155 }] });
+    }
+    if (path === "/v1/crud/orders/9001001" && options.method === "POST") {
+      updateCalls.push(JSON.parse(String(options.body ?? "{}")));
+      return json("1");
+    }
+    if (path === "/v1/services/aluno/findCoursesByStudent") {
+      // 1ª e 2ª chamadas: ainda vazio (polling inicial); depois do flip: curso presente.
+      const seenUpdates = updateCalls.length;
+      if (seenUpdates > 0) return json([{ tag: "cfp-2026_54", status: "APPROVED", id_turma: 4155, valor: 0 }]);
+      return json([]);
+    }
+    return json({ error: "not found" }, 404);
+  }
+
+  const client = createArtClient({ pollIntervalMs: 1, pollTimeoutMs: 4000 }, handler);
+  const service = createEnrollmentService(client, { provisionTimeoutMs: 2000, serviceAccounts: [] });
+  const logs = [];
+  const result = await service.enrollStudent({
+    email: "denied@example.com",
+    cpf: "19100000000",
+    tag: "cfp-2026_54",
+    fullName: "Cliente Denied",
+    onLog: (line) => logs.push(line),
+  });
+
+  assert.equal(result.status, "CONFIRMED", "flip resolveu a order DENIED");
+  assert.ok(result.flipRecovery, "deve ter usado o caminho de flip");
+  assert.equal(result.strategy, "flip-c");
+  assert.equal(result.enrollment.status, "APPROVED");
+  assert.ok(updateCalls.length >= 1, "deve ter chamado POST /v1/crud/orders/{id}");
+  const flip = updateCalls[0];
+  assert.equal(flip.status, "APPROVED");
+  assert.equal(flip.valor, 0);
+  assert.equal(flip.id_turma, 4155);
+  assert.ok(String(flip.json_retorno ?? "").includes("APPROVED"), "json_retorno marca APPROVED");
+  assert.ok(logs.some((l) => l.includes("[flip] POST order 9001001")), logs.join("\n"));
+});
+
+test("enrollStudent: curso APPROVED mas invisível é resolvido via id_turma swap (VETOR D)", async () => {
+  // Cenário real (CGE): o job aprovou a ordem (APPROVED) mas com turma LEGADO
+  // (128) — o findCoursesByStudent não lista porque a turma não está no
+  // catálogo vigente. O flip ajusta o id_turma para a vigente e o curso aparece.
+  const updateCalls = [];
+  const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
+
+  async function handler(url, options = {}) {
+    const u = new URL(url);
+    const path = u.pathname;
+    if (path === "/api/login") return json({ response: { status: "SUCCESS", data: { token: "rs256-real", id: 204999, id_usuario: 123456 } } });
+    if (path === "/v1/checkout/prepare") {
+      if (u.searchParams.get("id_turma") === "4107") return json({ course: { id_curso: 1355, tag_curso: "cge-2026", nome: "CGE", valor_curso: 2000 } });
+      return json({ error: "Course not found" }, 404);
+    }
+    if (path === "/v1/services/turmas") return json({ current_page: 1, last_page: 1, data: [{ id_turma: 4107, tag_curso: "cge-2026", ativa: 1, data_inicio_aulas: "2026-07-02" }] });
+    if (path === "/v1/services/student/metrics") return json({}, 405);
+    if (path === "/v1/checkout/findStudent") return json({ id_usuario: 123456, nome: "Cliente", documento: "19100000000" });
+    if (path === "/v1/checkout/process/start") return json({ ok: true }, 400); // PENDING
+    if (path === "/v1/services/aluno/findOrdersByStudent") {
+      return json({ data: [{ id_order: 9002002, id_usuario: 123456, curso: "cge-2026", id_curso: 1355, status: "APPROVED", valor: "0.00", id_cart: 7008, id_turma: 128 }] });
+    }
+    if (path === "/v1/crud/orders/9002002" && options.method === "POST") {
+      updateCalls.push(JSON.parse(String(options.body ?? "{}")));
+      return json("1");
+    }
+    if (path === "/v1/services/aluno/findCoursesByStudent") {
+      if (updateCalls.length > 0) return json([{ tag: "cge-2026", status: "APPROVED", id_turma: 4107, valor: 0 }]);
+      return json([]);
+    }
+    return json({ error: "not found" }, 404);
+  }
+
+  const client = createArtClient({ pollIntervalMs: 1, pollTimeoutMs: 4000 }, handler);
+  const service = createEnrollmentService(client, { provisionTimeoutMs: 2000, serviceAccounts: [] });
+  const logs = [];
+  const result = await service.enrollStudent({
+    email: "vetord@example.com",
+    cpf: "19100000000",
+    tag: "cge-2026",
+    fullName: "Cliente VetorD",
+    onLog: (line) => logs.push(line),
+  });
+
+  assert.equal(result.status, "CONFIRMED", "swap de turma resolveu o curso invisivel");
+  assert.equal(result.enrollment.id_turma, 4107);
+  assert.ok(updateCalls.some((p) => Object.keys(p).length === 1 && p.id_turma === 4107), "deve ter feito um POST só com id_turma (VETOR D)");
+  assert.ok(logs.some((l) => l.includes("[fix-turma]")), logs.join("\n"));
+});
+
+test("enrollStudent: flip acha a order usando PROFILE_ID do login (real ms-idm não devolve id_usuario)", async () => {
+  // Regressão do bug encontrado no teste ao vivo (2026-08-01): o login real do
+  // ms-idm devolve {id, profile_id} e NÃO devolve id_usuario. O flip chamava
+  // findOrdersByStudent com session.raw?.id_usuario = undefined -> id_usuario=0
+  // -> nenhuma order encontrada. Corrigido: usar profile_id do login.
+  const updateCalls = [];
+  const ordersCalls = [];
+  const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
+
+  async function handler(url, options = {}) {
+    const u = new URL(url);
+    const path = u.pathname;
+    if (path === "/api/login") {
+      // SIMULA O MS-IDM REAL: só id + profile_id (sem id_usuario)
+      return json({ response: { status: "SUCCESS", data: { token: "rs256-real", id: 204999, profile_id: 1155555 } } });
+    }
+    if (path === "/v1/checkout/prepare") {
+      if (u.searchParams.get("id_turma") === "4155") return json({ course: { id_curso: 1738, tag_curso: "cfp-2026_54", nome: "CFP", valor_curso: 9997 } });
+      return json({ error: "Course not found" }, 404);
+    }
+    if (path === "/v1/services/turmas") return json({ current_page: 1, last_page: 1, data: [{ id_turma: 4155, tag_curso: "cfp-2026_54", ativa: 1, data_inicio_aulas: "2026-07-02" }] });
+    if (path === "/v1/services/student/metrics") return json({}, 405);
+    if (path === "/v1/checkout/findStudent") {
+      // findStudent TAMBÉM sem id_usuario (perfil enxuto, como o real)
+      return json({ nome: "Cliente", documento: "19100000000" });
+    }
+    if (path === "/v1/checkout/process/start") return json({ ok: true }, 500);
+    if (path === "/v1/services/aluno/findOrdersByStudent") {
+      const body = JSON.parse(String(options.body ?? "{}"));
+      ordersCalls.push(body.id_usuario);
+      return json({ data: [{ id_order: 9003003, id_usuario: 1155555, curso: "cfp-2026_54", id_curso: 1738, status: "DENIED", valor: "9997.00", id_cart: 7009, id_turma: 4155 }] });
+    }
+    if (path === "/v1/crud/orders/9003003" && options.method === "POST") {
+      updateCalls.push(JSON.parse(String(options.body ?? "{}")));
+      return json("1");
+    }
+    if (path === "/v1/services/aluno/findCoursesByStudent") {
+      if (updateCalls.length > 0) return json([{ tag: "cfp-2026_54", status: "APPROVED", id_turma: 4155, valor: 0 }]);
+      return json([]);
+    }
+    return json({ error: "not found" }, 404);
+  }
+
+  const client = createArtClient({ pollIntervalMs: 1, pollTimeoutMs: 4000 }, handler);
+  const service = createEnrollmentService(client, { provisionTimeoutMs: 2000, serviceAccounts: [] });
+  const logs = [];
+  const result = await service.enrollStudent({
+    email: "profileid@example.com",
+    cpf: "19100000000",
+    tag: "cfp-2026_54",
+    fullName: "Cliente ProfileId",
+    onLog: (line) => logs.push(line),
+  });
+
+  assert.equal(result.status, "CONFIRMED", "flip resolveu a order DENIED usando profile_id do login");
+  assert.ok(result.flipRecovery, "usou o caminho de flip");
+  assert.ok(ordersCalls.length >= 1, "findOrdersByStudent foi chamado");
+  assert.equal(ordersCalls[0], 1155555, `findOrdersByStudent deve usar profile_id 1155555 (recebeu ${ordersCalls[0]})`);
+  assert.ok(updateCalls.length >= 1, "flip fez POST na order");
+  assert.ok(logs.some((l) => l.includes("[flip] POST order 9003003")), logs.join("\n"));
+});

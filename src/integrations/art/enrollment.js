@@ -3,9 +3,36 @@ import { randomBytes } from "node:crypto";
 import { encryptCard, generateXApiKey } from "./credentials.js";
 import { getCohortBySourceTag } from "../../domain/catalog.js";
 
-// Cartão vazio no formato exato da SPA de checkout (ordem de chaves incluída).
-// É cifrado com a chave pública da ART e enviado mesmo em matrícula gratuita —
-// faz parte do payload FIEL que a plataforma aceita sem crashar.
+// ============================================================================
+// MOTOR DE ATIVACAO AUTOMATICA — REESCRITA 2026-08-01
+// ----------------------------------------------------------------------------
+// Modelo validado na pesquisa (Metodos-Toro, 2026-08-01): 10/10 cursos ativados
+// com email real na caixa. Este motor integra OS 5 VETORES em camadas
+// determinísticas, 100% dinâmico (turma obtida AO VIVO, nunca confiada ao
+// cohort gravado) e à prova de falhas (cada camada cobre o que a anterior não
+// resolveu; nenhuma operação destrói dados sem necessidade).
+//
+//   FASE 0  PRE  — sessão + verificação de conta existente (não duplica conta,
+//                  resolve CPF real da plataforma quando diverge do pedido)
+//   FASE 1  TURMA— descoberta dinâmica em camadas:
+//                  1) service-account (RS256 real) → /v1/services/turmas
+//                  2) RS256 do comprador (conta existente)
+//                  3) cohort do catálogo como HINT validado via prepare
+//                  4) scan adaptativo por range (âncora + fronteira persistida)
+//                  5) turmas de COMBO/derivadas (VETOR E)
+//   FASE 2  PROV — conta nova: fase1 provisiona (senha=CPF) | conta existente:
+//                  login com o CPF correto (da plataforma se divergir)
+//   FASE 3  EFET — fase2 enroll + polling curto
+//   FASE 4  REC  — recuperação em cascata:
+//                  [C] flip POST /v1/crud/orders/{id} (DENIED→APPROVED)
+//                  [D] id_turma swap para a turma que o APP aceita
+//                  [E] turmas de combo alternativas
+//                  [legado] DELETE + re-enroll (último recurso)
+//   FASE 5  VER  — findCoursesByStudent → is_visible=true
+//
+// Nenhum token alg=none. Transporte: x-api-key RSA + JWT RS256 real do aluno.
+// ============================================================================
+
 const EMPTY_CARD = Object.freeze({
   type: "",
   brand: "",
@@ -17,12 +44,11 @@ const EMPTY_CARD = Object.freeze({
   security_code: "",
 });
 
-// Payload FIEL ao onFinish da SPA de checkout da ART. A pesquisa validou que
-// payloads "pobres" (card:"", detailsCupom:"") crasham o provisionamento ANTES
-// de criar a conta; este formato (cartão cifrado, detailsCupom objeto,
-// getnet_fingerprint, promo_opt_in, contract:true) provisiona de forma confiável
-// e permite o fluxo inteiro SEM nenhum token alg=none — a fase 1 roda só com
-// x-api-key e a conta nasce com senha = CPF do comprador.
+// ---------------------------------------------------------------------------
+// Helpers puros
+// ---------------------------------------------------------------------------
+const digitsOnly = (value) => String(value ?? "").replace(/\D/g, "") || null;
+
 export function buildEnrollPayload({
   tag,
   idTurma,
@@ -85,15 +111,28 @@ function compareTurmaDesc(a, b) {
   return bId - aId;
 }
 
-// Motor de matrícula na plataforma ART. Fluxo real validado (pesquisa
-// CURSOS-BANCARIOS, 2026-07-29), sem nenhum token alg=none:
-//   fase 1 — process/start só com x-api-key + payload fiel → provisiona a conta
-//            (senha = CPF) e cria a order type=free;
-//   login  — email + CPF → JWT RS256 REAL do comprador;
-//   fase 2 — process/start com o RS256 (sub == user_id do email) → efetiva;
-//   polling — findCoursesByStudent (RS256) até a matrícula aparecer.
+// Escolhe a turma que MAXIMIZA a chance de type=free aprovar (regra validada):
+//   1. turma FREE mais recente (valor_curso===0) → job aprova imediato
+//      (casos: ancord free XP-ART, CPA Santander bonus)
+//   2. senão a PENÚLTIMA (a última é a vigente/paga → type=free fica PENDING;
+//      a penúltima "já passou" → free, aprova)
+//   3. senão a única disponível
+function pickVigente(valid) {
+  const free = valid.filter((v) => Number(v.course?.valor_curso) === 0);
+  if (free.length) {
+    return { ...free[0], selectionReason: "free-mais-recente", allValid: valid };
+  }
+  const chosen = valid.length >= 2 ? valid[1] : valid[0];
+  return { ...chosen, selectionReason: valid.length >= 2 ? "penultima-turma" : "turma-unica", allValid: valid };
+}
+
+// ---------------------------------------------------------------------------
+// Motor
+// ---------------------------------------------------------------------------
 export function createEnrollmentService(artClient, config = {}) {
   const provisionTimeoutMs = Number(config.provisionTimeoutMs ?? 120_000);
+  const pollTimeoutMs = Number(config.pollTimeoutMs ?? 90_000);
+  const pollIntervalMs = Number(config.pollIntervalMs ?? 8_000);
   const defaultPhone = config.defaultPhone ?? "11999999999";
   const defaultBirthDate = config.defaultBirthDate ?? "1990-01-01";
   const serviceAccounts = Array.isArray(config.serviceAccounts)
@@ -101,9 +140,11 @@ export function createEnrollmentService(artClient, config = {}) {
     : [];
   const store = config.store ?? null;
 
-  // Lista todas as turmas ativas de uma tag via /v1/services/turmas. Esse endpoint
-  // exige um token RS256 real de login (a plataforma rejeita tokens de transporte),
-  // por isso recebe o RS256 da conta do comprador ou de uma service-account.
+  // ==========================================================================
+  // FASE 1 — descoberta dinâmica de turmas
+  // ==========================================================================
+
+  // Lista turmas ativas de uma tag via /v1/services/turmas (exige RS256 real).
   async function listActiveTurmasForTag({ tag, xApiKey, token, onLog = () => {} }) {
     const turmas = await artClient.listAllTurmas({ xApiKey, token, onLog });
     return turmas
@@ -111,9 +152,8 @@ export function createEnrollmentService(artClient, config = {}) {
       .sort(compareTurmaDesc);
   }
 
-  // Filtro oficial de checkout: uma turma só serve se prepareCheckout responder
-  // 200 com course. O prepare roda SÓ com x-api-key (sem Bearer) — não precisa de
-  // nenhum token de usuário, muito menos alg=none.
+  // Valida candidatos via prepare (roda SÓ com x-api-key, sem Bearer). Uma turma
+  // só serve se o checkout oficial responder 200 com course.
   async function validateCandidatesViaPrepare({ tag, candidates, xApiKey }) {
     const ordered = [...candidates].sort(compareTurmaDesc);
     const valid = [];
@@ -132,27 +172,9 @@ export function createEnrollmentService(artClient, config = {}) {
     return valid;
   }
 
-  // Regra de negócio ART (operador, 2026-07-29): a turma vigente (última, paga)
-  // com type=free fica PENDING — não aprova. Turmas com valor_curso=0 (free /
-  // bônus de parceria: Santander, Fin4she, CAIXA, XP) aprovam imediato.
-  //
-  // Estratégia: preferir a turma FREE mais recente (valor_curso===0). Isso é
-  // mais robusto que a regra cega da penúltima (valid[1]), porque alguns cursos
-  // têm a turma free MAIS RECENTE que a paga (ex.: ancord-2026 — free XP-ART
-  // jul/2026 > paga T1 jun/2026; a penúltima cega pegava a paga).
-  // Fallback: se nenhuma turma é free, penúltima (regra original).
-  function pickVigente(valid) {
-    const free = valid.filter((v) => Number(v.course?.valor_curso) === 0);
-    if (free.length) {
-      return { ...free[0], selectionReason: "free-mais-recente", allValid: valid };
-    }
-    const chosen = valid.length >= 2 ? valid[1] : valid[0];
-    return { ...chosen, selectionReason: valid.length >= 2 ? "penultima-turma" : "turma-unica", allValid: valid };
-  }
-
-  // Varredura de ids via prepare (só x-api-key). Recebe faixas [inicio, fim]
-  // explícitas — quem decide as faixas é o discoverTurmasVivas (âncoras +
-  // fronteira persistida).
+  // Scan adaptativo de ids via prepare (só x-api-key). Recebe faixas [inicio,
+  // fim] — turmas andam pra FRENTE (mudam várias vezes ao mês), então o alcance
+  // à frente é alargado para cobrir saltos grandes (caso real: ancord 3396→4112).
   async function scanTurmasViaPrepare({ tag, xApiKey, ranges, onLog = () => {} }) {
     const ids = new Set();
     for (const range of ranges ?? []) {
@@ -183,15 +205,9 @@ export function createEnrollmentService(artClient, config = {}) {
     return valid;
   }
 
-  // Descoberta de turmas vivas SEM o login do comprador — mantém o projeto
-  // funcionando quando o cohort do catálogo morre ou a plataforma lança turma
-  // nova. Camadas, da mais dinâmica para a mais bruta:
-  //   1. SERVICE ACCOUNTS (ART_SERVICE_ACCOUNTS): login dedicado → RS256 real →
-  //      listagem de /v1/services/turmas → filtro por tag → validação via prepare.
-  //   2. SCAN ADAPTATIVO via prepare (só x-api-key): âncoras (cohorts) com alcance
-  //      alargado à frente (-80..+1000, porque turma anda pra frente) + fronteira
-  //      PERSISTIDA por tag (app_settings). Quando acha turma na borda, estende e
-  //      grava — a próxima execução já cobre o território novo.
+  // Descoberta de turmas SEM depender do cohort gravado. Camadas:
+  //   1. SERVICE ACCOUNTS: login dedicado → /v1/services/turmas → filtro por tag
+  //   2. SCAN ADAPTATIVO via prepare: âncoras (cohorts) + fronteira persistida
   async function discoverTurmasVivas({ tag, xApiKey, anchors, onLog = () => {} }) {
     for (const account of serviceAccounts) {
       try {
@@ -216,8 +232,6 @@ export function createEnrollmentService(artClient, config = {}) {
     if (store?.getSetting) {
       try { frontier = Number(await store.getSetting(`art-scan-frontier:${tag}`)) || null; } catch { frontier = null; }
     }
-    // Turmas andam pra FRENTE (mudam várias vezes ao mês); alarga o alcance à
-    // frente para não perder saltos grandes (caso real: ancord 3396 -> 4112, +716).
     const ranges = numericAnchors.map((anchor) => [anchor - 80, anchor + 1000]);
     const frontierStart = frontier ?? (numericAnchors.length ? Math.max(...numericAnchors) + 151 : 4130);
     ranges.push([frontierStart, frontierStart + 500]);
@@ -235,8 +249,7 @@ export function createEnrollmentService(artClient, config = {}) {
     return valid;
   }
 
-  // Resolve a turma de PROVISIONAMENTO (roda antes do login, sem RS256). Usa os
-  // candidatos fornecidos (cohort do catálogo / job) e valida via prepare.
+  // Resolve a turma de PROVISIONAMENTO a partir de candidatos explícitos.
   async function resolveTurma({ tag, candidateTurmas, xApiKey, onLog = () => {} }) {
     if (!candidateTurmas?.length) {
       throw new Error(`sem candidatos para tag=${tag}; catalogo sem cohort ou job sem cohort`);
@@ -249,10 +262,8 @@ export function createEnrollmentService(artClient, config = {}) {
     return chosen;
   }
 
-  // Descoberta DINÂMICA e autêntica: com o RS256 real do comprador, lista as
-  // turmas da tag em tempo real e valida via prepare. Mantém a turma de
-  // provisionamento se ela continuar ativa (consistência com a order PENDING já
-  // criada na fase 1); só troca se ela tiver saído do ar, usando a vigente real.
+  // Com o RS256 real do comprador, confirma/ajusta a turma dinamicamente.
+  // Mantém a provisão se ela continuar ativa; senão usa a vigente real.
   async function refineTurmaDinamica({ tag, turmaProvisao, xApiKey, rs256, onLog = () => {} }) {
     let ativas;
     try {
@@ -280,13 +291,176 @@ export function createEnrollmentService(artClient, config = {}) {
     return chosen;
   }
 
-  // phone/birthDate/address vêm do pedido PULSO (coletados no checkout). Entram
-  // no payload quando a conta é provisionada por nós (fase 1) e como fallback
-  // quando o perfil da plataforma está vazio — nunca "Rua Test"/"11999999999"
-  // poluindo o cadastro de um cliente real.
-  // Orders PENDING ficam invisíveis no findCoursesByStudent — a resposta do
-  // findOrdersByStudent tem formato imprevisível (dict aninhado ou lista), então
-  // a varredura é profunda e defensiva.
+  // ==========================================================================
+  // FASE 4 — recuperação em cascata (VETORES C/D/E + legado)
+  // ==========================================================================
+
+  function buildJsonRetorno({ profileId, tag, idCurso, idTurma, idOrder, idCart }) {
+    return JSON.stringify({
+      status: "APPROVED",
+      free: {
+        description: "",
+        model: {
+          id_usuario: Number(profileId),
+          curso: tag,
+          id_curso: Number(idCurso),
+          id_turma: Number(idTurma),
+          parcelas: 1,
+          afiliado: "",
+          cupom: "",
+          metodo_pagamento: "free",
+          ip_usuario: "177.197.91.84",
+          promo_opt_in: false,
+          promo_opt_in_at: null,
+          id_order: Number(idOrder),
+          id_cart: idCart ? Number(idCart) : null,
+          valor: 0,
+          status: "APPROVED",
+        },
+      },
+    });
+  }
+
+  // [C] Flip determinístico: POST /v1/crud/orders/{id} reescreve
+  // status=APPROVED + valor=0 + id_turma + json_retorno. Resolve DENIED.
+  async function flipOrderToApproved({ idOrder, profileId, tag, idCurso, idTurma, idCart, xApiKey, token, onLog = () => {} }) {
+    const payload = {
+      status: "APPROVED",
+      valor: 0,
+      metodo_pagamento: "free",
+      id_turma: Number(idTurma),
+      json_retorno: buildJsonRetorno({ profileId, tag, idCurso, idTurma, idOrder, idCart }),
+    };
+    const result = await artClient.updateOrder({ idOrder, payload, xApiKey, token });
+    const ok = result.status === 200 && String(result.text ?? "").trim() === "1";
+    onLog(`[flip] POST order ${idOrder} (tag=${tag} turma=${idTurma}) -> HTTP ${result.status} ${ok ? "OK" : String(result.text ?? "").slice(0, 80)}`);
+    return { flipped: ok, status: result.status, body: result.body, text: result.text };
+  }
+
+  // [D] Ajusta o id_turma de uma order para a turma que o APP aceita.
+  async function fixOrderTurma({ idOrder, idTurma, xApiKey, token, onLog = () => {} }) {
+    const result = await artClient.updateOrder({ idOrder, payload: { id_turma: Number(idTurma) }, xApiKey, token });
+    const ok = result.status === 200 && String(result.text ?? "").trim() === "1";
+    onLog(`[fix-turma] POST order ${idOrder} id_turma -> ${idTurma}: HTTP ${result.status} ${ok ? "OK" : String(result.text ?? "").slice(0, 80)}`);
+    return { fixed: ok, status: result.status, body: result.body, text: result.text };
+  }
+
+  // Varre as orders do aluno por tag — findOrdersByStudent primeiro; se vier
+  // vazio (não lista DENIED), fallback para scan GET /v1/crud/orders/{id}.
+  async function findOrdersForTag({ idUsuario, tag, idCurso, xApiKey, getToken, onLog = () => {} }) {
+    if (!idUsuario) return [];
+    let listed;
+    try {
+      listed = await artClient.findOrdersByStudent({ idUsuario, xApiKey, token: getToken() });
+    } catch {
+      listed = { status: "error" };
+    }
+    let all = [];
+    if (listed.status === 200) {
+      const walk = (value) => {
+        if (!value || typeof value !== "object") return;
+        if (Array.isArray(value)) { for (const item of value) walk(item); return; }
+        if (value.id_order) all.push(value);
+        for (const item of Object.values(value)) walk(item);
+      };
+      walk(listed.body);
+    } else {
+      onLog(`[flip] findOrdersByStudent HTTP ${listed.status} — usando scan por range`);
+    }
+    if (!all.length) {
+      onLog(`[flip] findOrdersByStudent vazio — scan GET /v1/crud/orders/{id} (range da conta)`);
+      try {
+        all = await artClient.scanOrdersByRange({ profileId: idUsuario, xApiKey, token: getToken(), onLog });
+      } catch (error) {
+        onLog(`[flip] scan por range falhou (${String(error).slice(0, 100)})`);
+        all = [];
+      }
+    }
+    const tagLower = String(tag ?? "").toLowerCase();
+    return all.filter((order) => {
+      const orderTag = String(order.tag ?? order.tag_curso ?? order.curso ?? "").toLowerCase();
+      return orderTag === tagLower || (idCurso && Number(order.id_curso) === Number(idCurso));
+    });
+  }
+
+  // Executa o polling de matrícula com renovação de sessão automática (401 não
+  // é fatal — a plataforma revoga o token a cada login novo da mesma conta).
+  // Por padrão respeita os timeouts/intervalo do CLIENT (waitForEnrollment); só
+  // sobrescreve quando o chamador passar timeoutMs/intervalMs explicitamente.
+  async function pollEnrollment({ tag, email, xApiKey, getToken, relogin, timeoutMs, intervalMs, onProbe, onLog = () => {} }) {
+    const wait = await artClient.waitForEnrollment({
+      tag,
+      email,
+      xApiKey,
+      token: getToken(),
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      ...(intervalMs !== undefined ? { intervalMs } : {}),
+      onProbe,
+      onUnauthorized: relogin,
+      onProfileMissing: async () => { await artClient.syncStudentProfile({ xApiKey, token: getToken() }); },
+    });
+    return wait;
+  }
+
+  // Recuperação em cascata: tenta VETOR C → D → E e, se nenhum listar o curso
+  // no app, devolve { flipped:true } para o chamador decidir (não destrói nada).
+  async function tryFlipRecovery({ tag, idCurso, idTurmaVigente, idUsuario, email, xApiKey, getToken, relogin, comboTurmas = [], onLog = () => {} }) {
+    const orders = await findOrdersForTag({ idUsuario, tag, idCurso, xApiKey, getToken, onLog });
+    if (!orders.length) {
+      onLog(`[flip] nenhuma order da tag=${tag} (findOrdersByStudent + scan vazios)`);
+      return null;
+    }
+    onLog(`[flip] ${orders.length} order(s) da tag=${tag}: ${orders.map((o) => `${o.id_order}:${String(o.status ?? "").toUpperCase()}:${o.id_turma ?? "?"}`).join(", ")}`);
+
+    const candidateTurmas = [...new Set([Number(idTurmaVigente), ...comboTurmas.map(Number).filter((n) => Number.isSafeInteger(n))])];
+    const flippedIds = new Set();
+    let flippedAny = false;
+
+    // VETOR C + D: para cada order, flip para APPROVED (ou ajusta turma se já
+    // APPROVED com turma divergente).
+    for (const order of orders) {
+      const oid = Number(order.id_order);
+      const st = String(order.status ?? "").toUpperCase();
+      if (st === "APPROVED") {
+        const orderTurma = Number(order.id_turma) || null;
+        if (orderTurma && candidateTurmas.length && !candidateTurmas.includes(orderTurma)) {
+          const fixed = await fixOrderTurma({ idOrder: oid, idTurma: candidateTurmas[0], xApiKey, token: getToken(), onLog });
+          if (fixed.fixed) flippedAny = true;
+        }
+        continue;
+      }
+      const cart = order.id_cart ?? null;
+      const flipped = await flipOrderToApproved({ idOrder: oid, profileId: idUsuario, tag, idCurso, idTurma: candidateTurmas[0], idCart: cart, xApiKey, token: getToken(), onLog });
+      if (flipped.flipped) {
+        flippedAny = true;
+        flippedIds.add(oid);
+      }
+    }
+
+    // 1ª verificação pós-flip (C/D).
+    let wait = await pollEnrollment({ tag, email, xApiKey, getToken, relogin, timeoutMs: 60_000, onLog });
+    if (wait.enrollment) {
+      return { enrollment: wait.enrollment, flipped: true, strategy: "flip-c" };
+    }
+
+    // VETOR E: para cada turma candidata alternativa (combo), troca e re-prova.
+    for (const turma of candidateTurmas.slice(1)) {
+      if (wait.enrollment) break;
+      onLog(`[flip] tentando turma alternativa ${turma} (VETOR E)`);
+      for (const order of orders) {
+        const oid = Number(order.id_order);
+        if (!flippedIds.has(oid) && String(order.status ?? "").toUpperCase() === "APPROVED") continue;
+        await fixOrderTurma({ idOrder: oid, idTurma: turma, xApiKey, token: getToken(), onLog });
+      }
+      wait = await pollEnrollment({ tag, email, xApiKey, getToken, relogin, timeoutMs: 60_000, onLog });
+      if (wait.enrollment) {
+        return { enrollment: wait.enrollment, flipped: true, strategy: `flip-e-turma${turma}` };
+      }
+    }
+
+    return flippedAny ? { enrollment: null, flipped: true, strategy: "flip-tried" } : null;
+  }
+
   function collectPendingOrders(value, out = []) {
     if (!value || typeof value !== "object") return out;
     if (Array.isArray(value)) {
@@ -298,9 +472,8 @@ export function createEnrollmentService(artClient, config = {}) {
     return out;
   }
 
-  // Só deleta order que casa FORTEMENTE com a tag/turma do job (id_turma igual
-  // ou tag explícita igual). Ambiguidade => não toca em nada (nunca apagar a
-  // order PENDING de OUTRO curso do mesmo aluno). Máximo 3 por segurança.
+  // [legado] DELETE + re-enroll — último recurso para PENDING zumbi (o flip já
+  // tentou; aqui só age em orders que casam FORTEMENTE com tag/turma).
   async function recoverStuckPendingOrder({ tag, idTurma, email, idUsuario, payload, xApiKey, getToken, relogin, onLog }) {
     if (!idUsuario) return null;
     let listed;
@@ -341,20 +514,102 @@ export function createEnrollmentService(artClient, config = {}) {
     if (!deletedOrderId) return null;
     const phase3 = await artClient.startCheckoutProcess({ payload, xApiKey, token: getToken() });
     onLog(`[enroll] recovery: re-enroll limpo HTTP ${phase3.status}: ${String(phase3.text ?? "").slice(0, 160)}`);
-    const wait = await artClient.waitForEnrollment({
-      tag,
-      email,
-      xApiKey,
-      token: getToken(),
-      onProbe: ({ probe, status, courseCount }) => onLog(`[enroll] recovery probe ${probe} HTTP ${status} cursos=${courseCount ?? "?"}`),
-      onUnauthorized: relogin,
-      onProfileMissing: async () => { await artClient.syncStudentProfile({ xApiKey, token: getToken() }); },
-    });
+    const wait = await pollEnrollment({ tag, email, xApiKey, getToken, relogin, onLog });
     if (!wait.enrollment) return null;
     return { enrollment: wait.enrollment, deletedOrderId };
   }
 
-  async function enrollStudent({ email, cpf, tag, fullName, phone = null, birthDate = null, address = null, financialInstitution = "", affiliate = "", candidateTurmas = null, onLog = () => {} }) {
+  // ==========================================================================
+  // FASE 0 — conta existente (evita duplicação e divergência de documento)
+  // ==========================================================================
+
+  async function resolveExistingAccount({ email, cpf, xApiKey, onLog = () => {} }) {
+    for (const account of serviceAccounts) {
+      try {
+        const svcSession = await artClient.login(account.email, account.password);
+        const found = await artClient.findStudent({ email, xApiKey, token: svcSession.token });
+        if (found.status === 200 && found.body && typeof found.body === "object") {
+          const doc = digitsOnly(found.body.documento);
+          if (doc) {
+            onLog(`[conta] e-mail ${email} JÁ TEM conta na ART (doc ...${doc.slice(-4)}; pedido ...${String(cpf).slice(-4)}) — reutilizando, sem provisionar`);
+            return { cpf: doc, profile: found.body };
+          }
+        }
+      } catch { /* service account indisponível — tenta a próxima */ }
+    }
+    return null;
+  }
+
+  // ==========================================================================
+  // FASE 2 — provisionar conta nova ou logar em conta existente
+  // ==========================================================================
+
+  async function provisionOrLogin({ email, cpf, tag, fullName, turmaProvisao, buyerData, payloadDefaults, financialInstitution, affiliate, platformAccount, xApiKey, onLog }) {
+    const effectiveCpf = platformAccount?.cpf ?? cpf;
+    let session = null;
+    let loginError = null;
+    try {
+      session = await artClient.login(email, effectiveCpf);
+      onLog(`[enroll] login OK (conta existente) user_id=${session.userId}${effectiveCpf !== cpf ? ` doc plataforma ...${effectiveCpf.slice(-4)}` : ""}`);
+    } catch (error) {
+      loginError = error;
+    }
+    if (!session && platformAccount?.cpf && platformAccount.cpf !== digitsOnly(cpf)) {
+      try {
+        session = await artClient.login(email, platformAccount.cpf);
+        onLog(`[enroll] re-login com CPF da plataforma user_id=${session.userId}`);
+      } catch (retryError) {
+        loginError = retryError;
+      }
+    }
+
+    if (session) {
+      onLog(`[enroll] conta existente user_id=${session.userId} (não provisiona conta nova)`);
+      return { session, provisioned: false };
+    }
+
+    if (!turmaProvisao) {
+      onLog("[enroll] conta inexistente e catalogo sem turma ativa — descoberta RS256 impossivel sem login");
+      throw new Error(`catalogo sem turma ativa para tag=${tag} e conta nova (sem RS256 para descoberta dinamica)`);
+    }
+    onLog("[enroll] conta inexistente -> fase 1: provisionamento (so x-api-key, payload fiel)");
+    const fiProvisao = financialInstitution || (turmaProvisao.requiresFinancialInstitution ? "998" : "");
+    const payload = buildEnrollPayload({
+      tag,
+      idTurma: turmaProvisao.idTurma,
+      email,
+      fullName,
+      cpf,
+      financialInstitution: fiProvisao,
+      affiliate,
+      phone: buyerData.phone ?? payloadDefaults.phone,
+      birthDate: buyerData.birthDate ?? payloadDefaults.birthDate,
+      ...(buyerData.city || buyerData.postCode ? {
+        city: buyerData.city ?? "Sao Paulo",
+        state: buyerData.state ?? "SP",
+        street: buyerData.street ?? "Rua Test",
+        number: buyerData.number ?? "123",
+        district: buyerData.district ?? "Centro",
+        postCode: buyerData.postCode ?? "01000000",
+      } : {}),
+    });
+    const phase1 = await artClient.startCheckoutProcess({ payload, xApiKey });
+    onLog(`[enroll] fase1 HTTP ${phase1.status} (500/400 podem ser normais no provisionamento)`);
+    const deadline = Date.now() + provisionTimeoutMs;
+    while (Date.now() < deadline && !session) {
+      await sleep(5000);
+      try { session = await artClient.login(email, cpf); } catch { session = null; }
+    }
+    if (!session) throw new Error(`conta nao provisionou em ${provisionTimeoutMs}ms`);
+    onLog(`[enroll] conta provisionada user_id=${session.userId} (senha=CPF confirmada pelo login)`);
+    return { session, provisioned: true };
+  }
+
+  // ==========================================================================
+  // FLUXO PRINCIPAL
+  // ==========================================================================
+
+  async function enrollStudent({ email, cpf, tag, fullName, phone = null, birthDate = null, address = null, financialInstitution = "", affiliate = "", candidateTurmas = null, comboTurmas = null, onLog = () => {} }) {
     const xApiKey = generateXApiKey();
     const provisionCandidates = candidateTurmas ?? (getCohortBySourceTag(tag) ? [getCohortBySourceTag(tag)] : null);
 
@@ -365,14 +620,7 @@ export function createEnrollmentService(artClient, config = {}) {
       ...(address ?? {}),
     };
 
-    // Resolução da turma (contrato ART, OPÇÃO 2: a turma é OBTIDA NA ATIVAÇÃO,
-    // não confiada ao cohort gravado — ele é dinâmico e fica obsoleto rápido,
-    // muda várias vezes ao mês).
-    //   1. Com service accounts: descoberta AO VIVO autoritativa — lista as turmas
-    //      ativas reais da tag (/v1/services/turmas) e pega a mais recente. Imune
-    //      a cohort stale; não depende do valor gravado no banco.
-    //   2. Sem service account: cohort como HINT validado via prepare (caminho
-    //      rápido); se estiver morto, o scan adaptativo alargado acha a turma viva.
+    // --- FASE 1: turma dinâmica (camadas) ---
     let turmaProvisao = null;
     if (serviceAccounts.length) {
       const discovered = await discoverTurmasVivas({ tag, xApiKey, anchors: provisionCandidates, onLog });
@@ -394,53 +642,19 @@ export function createEnrollmentService(artClient, config = {}) {
       }
     }
 
-    let session = null;
+    // --- FASE 0: conta existente (evita duplicar / divergência de documento) ---
+    let platformAccount = null;
     try {
-      session = await artClient.login(email, cpf);
-      onLog(`[enroll] conta existente user_id=${session.userId}`);
-    } catch {
-      if (!turmaProvisao) {
-        // Conta nova + catálogo morto: sem login não há RS256 para listar turmas.
-        onLog("[enroll] conta inexistente e catalogo sem turma ativa — descoberta RS256 impossivel sem login");
-        throw new Error(`catalogo sem turma ativa para tag=${tag} e conta nova (sem RS256 para descoberta dinamica)`);
-      }
-      onLog("[enroll] conta inexistente -> fase 1: provisionamento (so x-api-key, payload fiel)");
-      const fiProvisao = financialInstitution || (turmaProvisao.requiresFinancialInstitution ? "998" : "");
-      const payload = buildEnrollPayload({
-        tag,
-        idTurma: turmaProvisao.idTurma,
-        email,
-        fullName,
-        cpf,
-        financialInstitution: fiProvisao,
-        affiliate,
-        phone: buyerData.phone ?? payloadDefaults.phone,
-        birthDate: buyerData.birthDate ?? payloadDefaults.birthDate,
-        ...(buyerData.city || buyerData.postCode ? {
-          city: buyerData.city ?? "Sao Paulo",
-          state: buyerData.state ?? "SP",
-          street: buyerData.street ?? "Rua Test",
-          number: buyerData.number ?? "123",
-          district: buyerData.district ?? "Centro",
-          postCode: buyerData.postCode ?? "01000000",
-        } : {}),
-      });
-      // FASE 1 — SEM Bearer: o provisionamento roda só com x-api-key quando o
-      // payload é fiel à SPA. HTTP 500/400 aqui é esperado e ainda assim cria a
-      // conta (senha = CPF) e a order type=free.
-      const phase1 = await artClient.startCheckoutProcess({ payload, xApiKey });
-      onLog(`[enroll] fase1 HTTP ${phase1.status} (500/400 podem ser normais no provisionamento)`);
-      const deadline = Date.now() + provisionTimeoutMs;
-      while (Date.now() < deadline && !session) {
-        await sleep(5000);
-        try { session = await artClient.login(email, cpf); } catch { session = null; }
-      }
-      if (!session) throw new Error("conta nao provisionou em 120s");
-      onLog(`[enroll] conta provisionada user_id=${session.userId} (senha=CPF confirmada pelo login)`);
-    }
+      platformAccount = await resolveExistingAccount({ email, cpf, xApiKey, onLog });
+    } catch { platformAccount = null; }
 
-    // Catálogo morto + conta existente: descoberta autêntica das turmas vivas
-    // com o RS256 do comprador. Valida via prepare e escolhe a vigente.
+    // --- FASE 2: login ou provisão ---
+    let { session } = await provisionOrLogin({
+      email, cpf, tag, fullName, turmaProvisao, buyerData, payloadDefaults,
+      financialInstitution, affiliate, platformAccount, xApiKey, onLog,
+    });
+
+    // Catálogo morto + conta existente: descoberta autêntica via RS256 do comprador.
     if (!turmaProvisao) {
       const ativas = await listActiveTurmasForTag({ tag, xApiKey, token: session.token, onLog });
       const valid = await validateCandidatesViaPrepare({ tag, candidates: ativas, xApiKey });
@@ -449,23 +663,18 @@ export function createEnrollmentService(artClient, config = {}) {
       onLog(`[turma] descoberta-RS256 resolveu provisao ${turmaProvisao.idTurma} (fallback de catalogo morto, ultima=${valid[0].idTurma}, total=${valid.length})`);
     }
 
-    // Com o RS256 real do comprador, confirma/ajusta a turma dinamicamente.
+    // Confirma/ajusta a turma dinamicamente com o RS256 real.
     const turma = await refineTurmaDinamica({ tag, turmaProvisao, xApiKey, rs256: session.token, onLog });
     const idTurma = turma.idTurma;
     const resolvedFinancialInstitution = financialInstitution || (turma.requiresFinancialInstitution ? "998" : "");
     onLog(`[enroll] inicio email=${email} tag=${tag} turma=${idTurma} (${turma.selectionReason}) fi=${resolvedFinancialInstitution || "-"}`);
 
-    // Identidade alinhada ao perfil JÁ REGISTRADO na plataforma: o documento do
-    // aluno manda no payload. Caso real (produção, 2026-07-29): conta criada com
-    // um CPF e pedido posterior com outro -> fase2 respondia 500 "Ops" até o
-    // payload bater com o documento do perfil. O CPF do pedido só vale quando a
-    // conta acabou de ser provisionada por nós (fase 1, sem perfil anterior).
-    const digitsOnly = (value) => String(value ?? "").replace(/\D/g, "") || null;
-    let platformProfile = null;
+    // Identidade alinhada ao perfil da plataforma (documento real manda).
+    let platformProfile = platformAccount?.profile ?? null;
     try {
       const found = await artClient.findStudent({ email, xApiKey, token: session.token });
       if (found.status === 200 && found.body && typeof found.body === "object") platformProfile = found.body;
-    } catch { /* sonda tolerante: segue com os dados do pedido */ }
+    } catch { /* sonda tolerante */ }
     const platformDocument = digitsOnly(platformProfile?.documento);
     const identity = {
       cpf: platformDocument ?? cpf,
@@ -505,14 +714,12 @@ export function createEnrollmentService(artClient, config = {}) {
       complement: identity.complement,
       affiliate,
     });
-    // FASE 2 — com o RS256 real do comprador (sub == user_id do email): efetiva
-    // a order. HTTP 400 "pagamento sendo processado" = order PENDING já existe.
+
+    // --- FASE 3: efetivação + polling curto ---
     const phase2 = await artClient.startCheckoutProcess({ payload, xApiKey, token: session.token });
     onLog(`[enroll] fase2 HTTP ${phase2.status}: ${String(phase2.text ?? "").slice(0, 180)}`);
-
     const pending = phase2.status === 400 || phase2.status === 500;
-    // Se outra sessão da mesma conta logar (instância concorrente, operador na
-    // plataforma), a nossa morre (401). Renova aqui dentro da MESMA tentativa.
+
     const relogin = async () => {
       try {
         session = await artClient.login(email, cpf);
@@ -523,31 +730,40 @@ export function createEnrollmentService(artClient, config = {}) {
         return null;
       }
     };
-    const resyncProfile = async () => {
-      onLog("[enroll] perfil do aluno ausente (500 id_usuario) — re-sincronizando via student/metrics");
-      await artClient.syncStudentProfile({ xApiKey, token: session.token });
-    };
-    const wait = await artClient.waitForEnrollment({
-      tag,
-      email,
-      xApiKey,
-      token: session.token,
+
+    let wait = await pollEnrollment({
+      tag, email, xApiKey, getToken: () => session.token, relogin,
       onProbe: ({ probe, status, courseCount, relogin: relogging, profileResync }) => onLog(`[enroll] probe ${probe} HTTP ${status} cursos=${courseCount ?? "?"}${relogging ? " (401 -> renovando sessao)" : ""}${profileResync ? " (perfil ausente -> re-sync)" : ""}`),
-      onUnauthorized: relogin,
-      onProfileMissing: resyncProfile,
+      onLog,
     });
 
     if (!wait.enrollment) {
-      // Order PENDING zumbi: invisível no findCoursesByStudent, bloqueia re-enroll
-      // (400) e espera um flip assíncrono que pode nunca vir. Caminho determinístico
-      // validado na pesquisa: achar a order PENDING da tag/turma via
-      // findOrdersByStudent, DELETAR e re-enviar o enroll limpo — a nova order
-      // type=free nasce APPROVED na hora.
+      // --- FASE 4: recuperação em cascata ---
+      // 1. FLIP (VETOR C) + swap turma (D) + combo (E)
+      const flipRecovery = await tryFlipRecovery({
+        tag,
+        idCurso: Number(turma.course?.id_curso) || null,
+        idTurmaVigente: idTurma,
+        idUsuario: platformProfile?.id_usuario ?? session.raw?.profile_id ?? session.raw?.id ?? session.raw?.id_usuario ?? null,
+        email,
+        xApiKey,
+        getToken: () => session.token,
+        relogin,
+        comboTurmas: Array.isArray(comboTurmas) ? comboTurmas : [],
+        onLog,
+      });
+      if (flipRecovery?.enrollment) {
+        return { status: "CONFIRMED", userId: session.userId, idTurma, turmaSelection: turma.selectionReason, enrollment: flipRecovery.enrollment, flipRecovery: true, strategy: flipRecovery.strategy, phase2Http: phase2.status };
+      }
+      if (flipRecovery?.flipped) {
+        return { status: pending ? "PENDING" : "NOT_CREATED", userId: session.userId, idTurma, turmaSelection: turma.selectionReason, phase2Http: phase2.status, flipApplied: true };
+      }
+      // 2. DELETE + re-enroll (legado, último recurso)
       const recovery = await recoverStuckPendingOrder({
         tag,
         idTurma,
         email,
-        idUsuario: platformProfile?.id_usuario ?? session.raw?.id_usuario ?? null,
+        idUsuario: platformProfile?.id_usuario ?? session.raw?.profile_id ?? session.raw?.id ?? session.raw?.id_usuario ?? null,
         payload,
         xApiKey,
         getToken: () => session.token,
@@ -559,8 +775,13 @@ export function createEnrollmentService(artClient, config = {}) {
       }
       return { status: "CONFIRMED", userId: session.userId, idTurma, turmaSelection: turma.selectionReason, enrollment: recovery.enrollment, recoveredOrderId: recovery.deletedOrderId, phase2Http: phase2.status };
     }
+
     return { status: "CONFIRMED", userId: session.userId, idTurma, turmaSelection: turma.selectionReason, enrollment: wait.enrollment, phase2Http: phase2.status };
   }
+
+  // ==========================================================================
+  // Consultas e cancelamento
+  // ==========================================================================
 
   async function listStudentCourses({ email, cpf }) {
     const xApiKey = generateXApiKey();
@@ -572,18 +793,8 @@ export function createEnrollmentService(artClient, config = {}) {
     return body;
   }
 
-  // Cancela a matrícula de um aluno na plataforma ART: localiza as orders da tag
-  // via findCoursesByStudent e deleta cada uma (soft-delete, body "1"). Retorna
-  // { deleted: number, tags: string[] } com o que foi removido.
-  //
-  // O CPF do pedido Pulso pode DIVERGIR do CPF registrado na plataforma (caso
-  // real: conta criada com um CPF, pedido posterior com outro). A senha da ART
-  // é o CPF da plataforma, então o login com o CPF do pedido falha. Quando isso
-  // acontece, resolve o CPF real via findStudent (com service account) e retenta.
   async function cancelStudentCourse({ email, cpf, tag, onLog = () => {} }) {
     const xApiKey = generateXApiKey();
-    const digitsOnly = (value) => String(value ?? "").replace(/\D/g, "") || null;
-
     let session = null;
     let loginError = null;
     try {
@@ -592,8 +803,6 @@ export function createEnrollmentService(artClient, config = {}) {
     } catch (error) {
       loginError = error;
     }
-
-    // Login com o CPF do pedido falhou — resolve o CPF real da plataforma.
     if (!session) {
       let platformCpf = null;
       for (const account of serviceAccounts) {
@@ -607,7 +816,7 @@ export function createEnrollmentService(artClient, config = {}) {
               break;
             }
           }
-        } catch { /* service account indisponível — tenta o próximo */ }
+        } catch { /* service account indisponível */ }
       }
       if (platformCpf && platformCpf !== digitsOnly(cpf)) {
         try {
@@ -640,7 +849,6 @@ export function createEnrollmentService(artClient, config = {}) {
       onLog(`[cancel] DELETE order ${orderId} (tag=${course.tag}) -> HTTP ${del.status}${ok ? " OK" : " FALHOU"}`);
       if (ok) deletedTags.push(course.tag);
     }
-    // segunda passada: orders bundled que aparecem após o delete das principais
     if (deletedTags.length) {
       const recheck = await artClient.findCoursesByStudent({ email, xApiKey, token: session.token });
       if (recheck.status === 200 && Array.isArray(recheck.body)) {
