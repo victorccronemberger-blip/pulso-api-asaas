@@ -112,5 +112,16 @@ export function getEnvironment(source = process.env) {
     artMaxRetries: parsePositiveInteger(source.ART_MAX_RETRIES, 3, "ART_MAX_RETRIES"),
     artRetryDelayMs: parsePositiveInteger(source.ART_RETRY_DELAY_MS, 15_000, "ART_RETRY_DELAY_MS"),
     artTlsRejectUnauthorized,
+    bunnyStreamLibraryId: source.BUNNY_STREAM_LIBRARY_ID?.trim() || null,
+    bunnyStreamTokenKey: source.BUNNY_STREAM_TOKEN_KEY?.trim() || null,
+    bunnyStreamEmbedOrigin: source.BUNNY_STREAM_EMBED_ORIGIN?.trim() || "https://iframe.mediadelivery.net",
+    bunnyPlaybackTokenTtlSeconds: parsePositiveInteger(
+      source.BUNNY_PLAYBACK_TOKEN_TTL_SECONDS,
+      300,
+      "BUNNY_PLAYBACK_TOKEN_TTL_SECONDS",
+    ),
+    bunnyStorageZone: source.BUNNY_STORAGE_ZONE?.trim() || null,
+    bunnyStorageAccessKey: source.BUNNY_STORAGE_ACCESS_KEY?.trim() || null,
+    bunnyStorageApiOrigin: source.BUNNY_STORAGE_API_ORIGIN?.trim() || "https://storage.bunnycdn.com",
   });
 }

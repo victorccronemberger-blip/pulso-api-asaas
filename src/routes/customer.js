@@ -24,8 +24,11 @@ import {
 } from "../customer/validation.js";
 import { parseCookies } from "../admin/security.js";
 import { publicInstallmentPlan } from "../services/installment-service.js";
+import { Readable } from "node:stream";
+import { bunnyMaterialUrl, createBunnyPlaybackUrl } from "../learning/bunny.js";
 
 const ORDER_ID = /^[0-9a-f-]{36}$/i;
+const LEARNING_ID = /^[a-z0-9][a-z0-9-]{1,95}$/i;
 
 export function createCustomerRouter(express, {
   customerMailer,
@@ -384,6 +387,150 @@ export function createCustomerRouter(express, {
         message: "Não foi possível atualizar as parcelas agora.",
       });
     }
+  });
+
+  router.get("/learning/courses", async (request, response) => {
+    const session = await requireSession(request, response);
+    if (!session) return;
+    response.json({ courses: await store.listCustomerLearningCourses(session.customer.id) });
+  });
+
+  router.get("/learning/courses/:courseSlug", async (request, response) => {
+    const session = await requireSession(request, response);
+    if (!session) return;
+    if (!LEARNING_ID.test(request.params.courseSlug)) {
+      response.status(404).json({ error: "course_not_found", message: "Curso não encontrado." });
+      return;
+    }
+    const course = await store.getCustomerLearningCourse(session.customer.id, request.params.courseSlug);
+    if (!course) {
+      response.status(404).json({ error: "course_not_found", message: "Este curso não está liberado nesta conta." });
+      return;
+    }
+    response.json({ course });
+  });
+
+  router.get("/learning/courses/:courseSlug/lessons/:lessonId/playback", limiter, async (request, response) => {
+    const session = await requireSession(request, response);
+    if (!session) return;
+    if (!LEARNING_ID.test(request.params.courseSlug) || !LEARNING_ID.test(request.params.lessonId)) {
+      response.status(404).json({ error: "lesson_not_found", message: "Aula não encontrada." });
+      return;
+    }
+    const lesson = await store.getCustomerLearningLesson(session.customer.id, request.params.courseSlug, request.params.lessonId);
+    if (!lesson) {
+      response.status(404).json({ error: "lesson_not_found", message: "Esta aula não está liberada nesta conta." });
+      return;
+    }
+    const playback = createBunnyPlaybackUrl(environment, lesson.bunnyVideoId);
+    if (!playback) {
+      response.status(503).json({ error: "playback_unavailable", message: "O vídeo está sendo preparado. Tente novamente em instantes." });
+      return;
+    }
+    response.json({
+      lesson: {
+        id: lesson.id,
+        title: lesson.title,
+        durationSeconds: lesson.durationSeconds,
+        positionSeconds: lesson.positionSeconds,
+        completed: lesson.completed,
+      },
+      playback,
+    });
+  });
+
+  router.patch("/learning/courses/:courseSlug/lessons/:lessonId/progress", limiter, async (request, response) => {
+    const session = await requireSession(request, response);
+    if (!session) return;
+    if (!requireCsrf(request, response, session)) return;
+    if (!LEARNING_ID.test(request.params.courseSlug) || !LEARNING_ID.test(request.params.lessonId)) {
+      response.status(404).json({ error: "lesson_not_found", message: "Aula não encontrada." });
+      return;
+    }
+    const positionSeconds = Number(request.body?.positionSeconds);
+    if (!Number.isFinite(positionSeconds) || positionSeconds < 0 || positionSeconds > 86_400) {
+      response.status(400).json({ error: "invalid_progress", message: "Progresso inválido." });
+      return;
+    }
+    const progress = await store.saveCustomerLessonProgress(
+      session.customer.id,
+      request.params.courseSlug,
+      request.params.lessonId,
+      { positionSeconds, completed: request.body?.completed === true },
+    );
+    if (!progress) {
+      response.status(404).json({ error: "lesson_not_found", message: "Aula não encontrada." });
+      return;
+    }
+    response.json({ progress });
+  });
+
+  router.get("/learning/courses/:courseSlug/lessons/:lessonId/material", limiter, async (request, response) => {
+    const session = await requireSession(request, response);
+    if (!session) return;
+    if (!LEARNING_ID.test(request.params.courseSlug) || !LEARNING_ID.test(request.params.lessonId)) {
+      response.status(404).json({ error: "material_not_found", message: "Material não encontrado." });
+      return;
+    }
+    const lesson = await store.getCustomerLearningLesson(session.customer.id, request.params.courseSlug, request.params.lessonId);
+    const materialUrl = bunnyMaterialUrl(environment, lesson?.materialPath);
+    if (!lesson || !materialUrl) {
+      response.status(404).json({ error: "material_not_found", message: "Esta aula não possui material disponível." });
+      return;
+    }
+    const upstream = await fetch(materialUrl, {
+      headers: { AccessKey: environment.bunnyStorageAccessKey, accept: "application/pdf" },
+    });
+    if (!upstream.ok || !upstream.body) {
+      response.status(502).json({ error: "material_unavailable", message: "Não foi possível abrir o material agora." });
+      return;
+    }
+    response.set("Content-Type", upstream.headers.get("content-type") || "application/pdf");
+    response.set("Content-Disposition", `inline; filename="${request.params.lessonId}.pdf"`);
+    const length = upstream.headers.get("content-length");
+    if (length) response.set("Content-Length", length);
+    Readable.fromWeb(upstream.body).pipe(response);
+  });
+
+  router.get("/learning/quizzes/:quizId", async (request, response) => {
+    const session = await requireSession(request, response);
+    if (!session) return;
+    if (!LEARNING_ID.test(request.params.quizId)) {
+      response.status(404).json({ error: "quiz_not_found", message: "Simulado não encontrado." });
+      return;
+    }
+    const quiz = await store.getCustomerLearningQuiz(session.customer.id, request.params.quizId);
+    if (!quiz) {
+      response.status(404).json({ error: "quiz_not_found", message: "Este simulado não está liberado nesta conta." });
+      return;
+    }
+    response.json({ quiz });
+  });
+
+  router.post("/learning/quizzes/:quizId/submit", limiter, async (request, response) => {
+    const session = await requireSession(request, response);
+    if (!session) return;
+    if (!requireCsrf(request, response, session)) return;
+    if (!LEARNING_ID.test(request.params.quizId) || !Array.isArray(request.body?.answers) || request.body.answers.length > 100) {
+      response.status(400).json({ error: "invalid_quiz_answers", message: "Confira as respostas enviadas." });
+      return;
+    }
+    const result = await store.submitCustomerLearningQuiz(session.customer.id, request.params.quizId, request.body.answers);
+    if (!result) {
+      response.status(404).json({ error: "quiz_not_found", message: "Simulado não encontrado." });
+      return;
+    }
+    response.status(201).json({ result });
+  });
+
+  router.get("/learning/courses/:courseSlug/attempts", async (request, response) => {
+    const session = await requireSession(request, response);
+    if (!session) return;
+    if (!LEARNING_ID.test(request.params.courseSlug) || !await store.hasCustomerCourseAccess(session.customer.id, request.params.courseSlug)) {
+      response.status(404).json({ error: "course_not_found", message: "Curso não encontrado." });
+      return;
+    }
+    response.json({ attempts: await store.listCustomerLearningAttempts(session.customer.id, request.params.courseSlug) });
   });
 
   return router;
