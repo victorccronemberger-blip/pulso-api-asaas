@@ -25,12 +25,23 @@ function parseList(value, fallback = []) {
 function parseBunnyLearningConfig(value) {
   const raw = String(value ?? "").trim();
   if (!raw) return {};
-  try {
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    throw new Error("BUNNY_LEARNING_CONFIG must be valid JSON.");
+  const candidates = [raw];
+  if (!raw.startsWith("{")) {
+    try {
+      candidates.push(Buffer.from(raw, "base64").toString("utf8"));
+    } catch {
+      // The validation error below remains intentionally generic.
+    }
   }
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+    } catch {
+      // Try the next transport representation.
+    }
+  }
+  throw new Error("BUNNY_LEARNING_CONFIG must be valid JSON or base64-encoded JSON.");
 }
 
 // Contas de serviço da plataforma ART (formato "email:senha,email2:senha2").
