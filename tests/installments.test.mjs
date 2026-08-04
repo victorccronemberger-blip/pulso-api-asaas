@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createApp } from "../src/application.js";
-import { createInMemoryStore } from "../src/admin/in-memory-store.js";
+import { createInMemoryStore } from "../src/store/in-memory-store.js";
 import {
   createInstallmentService,
   publicInstallmentPlan,
@@ -12,7 +12,7 @@ const environment = {
   ASAAS_ENVIRONMENT: "sandbox",
   ASAAS_API_KEY: "$aact_test_key",
   ASAAS_WEBHOOK_TOKEN: "pulso-installment-webhook-token-2026",
-  SESSION_PEPPER: "pulso-installment-session-pepper-2026",
+  TRUSTED_CHECKOUT_TOKEN: "pulso-trusted-checkout-token-2026",
 };
 
 const providerRows = [
@@ -46,14 +46,13 @@ const providerRows = [
   },
 ];
 
-async function createPlanOrder(store, customerId = "customer-01") {
+async function createPlanOrder(store) {
   return store.createOrder({
     provider: "asaas",
     providerOrderId: "pay_installment_01",
     providerGroupId: "ins_plan_123456",
     status: "open",
     buyerEmail: "cliente@pulso.test",
-    customerId,
     paymentMethod: "pix_installment",
     installments: 3,
     installmentCents: 5_000,
@@ -105,11 +104,10 @@ test("synchronizes the authoritative Asaas plan and exposes only safe payment li
   assert.equal(plan.installments[2].status, "scheduled");
   assert.equal(plan.installments[2].paymentUrl, null);
 
-  const [stored] = await store.listCustomerOrders("customer-01");
+  const [stored] = await store.listOrders({ limit: 1 });
   assert.equal(stored.status, "partially_paid");
   assert.equal(stored.paidCents, 5_000);
   assert.equal(stored.paidInstallments, 1);
-  assert.ok(stored.accessGrantedAt);
 });
 
 test("processes each Pix installment webhook independently and idempotently", async (context) => {
@@ -139,56 +137,16 @@ test("processes each Pix installment webhook independently and idempotently", as
   const duplicate = await send(providerRows[0], "evt_installment_0001");
   assert.deepEqual(await duplicate.json(), { received: true, duplicate: true });
 
-  let [order] = await store.listCustomerOrders("customer-01");
+  let [order] = await store.listOrders({ limit: 1 });
   assert.equal(order.status, "partially_paid");
   assert.equal(order.paidInstallments, 1);
 
   await send({ ...providerRows[1], status: "CONFIRMED", paymentDate: "2026-09-01" }, "evt_installment_0002");
   await send({ ...providerRows[2], status: "CONFIRMED", paymentDate: "2026-10-01" }, "evt_installment_0003");
-  [order] = await store.listCustomerOrders("customer-01");
+  [order] = await store.listOrders({ limit: 1 });
   assert.equal(order.status, "paid");
   assert.equal(order.paidInstallments, 3);
   assert.equal(order.paidCents, 15_000);
-});
-
-test("customer can explicitly refresh only their own installment plan", async (context) => {
-  const store = createInMemoryStore();
-  const asaasClient = {
-    async listInstallmentPayments() { return { data: providerRows }; },
-  };
-  const base = await serve(context, store, asaasClient);
-  const registration = await fetch(`${base}/v1/customer/register`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      displayName: "Cliente Pulso",
-      email: "cliente@pulso.test",
-      password: "senha-segura-pulso-2026",
-    }),
-  });
-  assert.equal(registration.status, 201);
-  const body = await registration.json();
-  const cookie = registration.headers.getSetCookie()
-    .map((value) => value.split(";")[0])
-    .join("; ");
-  await createPlanOrder(store, body.customer.id);
-  const [order] = await store.listCustomerOrders(body.customer.id);
-
-  const refreshed = await fetch(
-    `${base}/v1/customer/orders/${order.id}/installments/refresh`,
-    {
-      method: "POST",
-      headers: { cookie, "x-csrf-token": body.csrfToken },
-    },
-  );
-  assert.equal(refreshed.status, 200);
-  assert.equal((await refreshed.json()).pixInstallmentPlan.remainingInstallments, 2);
-
-  const portal = await fetch(`${base}/v1/customer/orders`, { headers: { cookie } });
-  const portalOrder = (await portal.json()).orders[0];
-  assert.equal(portalOrder.pixInstallmentPlan.nextInstallmentNumber, 2);
-  assert.equal(portalOrder.providerGroupId, undefined);
-  assert.equal(portalOrder.providerOrderId, undefined);
 });
 
 test("public plan keeps the expected shape when the provider has not listed parcels yet", () => {

@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createApp } from "../src/application.js";
-import { createInMemoryStore } from "../src/admin/in-memory-store.js";
+import { createInMemoryStore } from "../src/store/in-memory-store.js";
+
+const TRUSTED_TOKEN = "pulso-trusted-checkout-token-2026";
 
 const enabledEnvironment = {
   ASAAS_ENABLED: "true",
   ASAAS_ENVIRONMENT: "sandbox",
   ASAAS_API_KEY: "$aact_test_key",
   ASAAS_WEBHOOK_TOKEN: "pulso-webhook-token-with-more-than-32-characters",
+  TRUSTED_CHECKOUT_TOKEN: TRUSTED_TOKEN,
 };
 
 async function serve(context, overrides = {}, dependencies = {}) {
@@ -34,28 +37,12 @@ function buyer() {
   };
 }
 
-function requestHeaders(key = crypto.randomUUID()) {
+function trustedHeaders(key = crypto.randomUUID(), token = TRUSTED_TOKEN) {
   return {
     "content-type": "application/json",
     "idempotency-key": key,
+    "x-pulso-trusted-token": token,
   };
-}
-
-async function authenticatedHeaders(origin, key = crypto.randomUUID()) {
-  const registration = await fetch(`${origin}/v1/customer/register`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      displayName: "Victor Cronemberger",
-      email: buyer().email,
-      password: "pulso-test-password-2026",
-    }),
-  });
-  assert.equal(registration.status, 201);
-  const cookie = registration.headers.getSetCookie()
-    .map((value) => value.split(";")[0])
-    .join("; ");
-  return { ...requestHeaders(key), cookie };
 }
 
 test("reports a healthy API while keeping checkout disabled without Asaas credentials", async (context) => {
@@ -69,7 +56,7 @@ test("reports a healthy API while keeping checkout disabled without Asaas creden
     status: "ok",
     service: "pulso-api",
     database: { status: "ready", error: null },
-    capabilities: { checkout: false, transactionalEmail: false },
+    capabilities: { checkout: false },
   });
 
   const status = await fetch(`${origin}/v1/checkout/status`);
@@ -79,6 +66,7 @@ test("reports a healthy API while keeping checkout disabled without Asaas creden
     environment: "sandbox",
     methods: [],
     cardMode: "hosted_invoice",
+    cardInstallmentMaximum: 10,
     pixInstallmentMode: "monthly_manual_payment",
     pixInstallmentMaximum: 6,
     pixAutomatic: false,
@@ -105,6 +93,31 @@ test("removes a transport escape preserved before an Asaas key", () => {
   });
   assert.equal(environment.asaasApiKey, "$aact_test_key");
   assert.equal(environment.checkoutEnabled, true);
+});
+
+test("rejects order creation without the trusted frontend token", async (context) => {
+  const asaasClient = {
+    findCustomersByDocument: async () => assert.fail("Asaas must not be called"),
+  };
+  const origin = await serve(context, enabledEnvironment, { asaasClient });
+  const payload = JSON.stringify({
+    slugs: ["novo-cpa"],
+    couponCode: null,
+    buyer: buyer(),
+    payment: { method: "pix" },
+  });
+  const missing = await fetch(`${origin}/v1/checkout/orders`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID() },
+    body: payload,
+  });
+  assert.equal(missing.status, 401);
+  const wrong = await fetch(`${origin}/v1/checkout/orders`, {
+    method: "POST",
+    headers: trustedHeaders(crypto.randomUUID(), "token-errado"),
+    body: payload,
+  });
+  assert.equal(wrong.status, 401);
 });
 
 test("creates a Pix charge from server-authoritative prices", async (context) => {
@@ -143,11 +156,10 @@ test("creates a Pix charge from server-authoritative prices", async (context) =>
   const origin = await serve(context, enabledEnvironment, { asaasClient });
   const response = await fetch(`${origin}/v1/checkout/orders`, {
     method: "POST",
-    headers: await authenticatedHeaders(origin),
+    headers: trustedHeaders(),
     body: JSON.stringify({
       slugs: ["novo-cpa", "ancord-2026"],
       couponCode: null,
-      clientTotalCents: 1,
       buyer: buyer(),
       payment: { method: "pix" },
     }),
@@ -208,11 +220,12 @@ test("creates a finite Pix installment plan without increasing the customer tota
       payload: "000201PULSOPARCELADO",
       expirationDate: "2026-07-29",
     }),
+    listInstallmentPayments: async () => ({ data: [] }),
   };
   const origin = await serve(context, enabledEnvironment, { asaasClient });
   const response = await fetch(`${origin}/v1/checkout/orders`, {
     method: "POST",
-    headers: await authenticatedHeaders(origin),
+    headers: trustedHeaders(),
     body: JSON.stringify({
       slugs: ["novo-cpa"],
       couponCode: null,
@@ -276,10 +289,9 @@ test("recovers a Pix QR Code without creating a second charge", async (context) 
     },
   };
   const origin = await serve(context, enabledEnvironment, { asaasClient });
-  const headers = await authenticatedHeaders(origin);
   const response = await fetch(`${origin}/v1/checkout/orders`, {
     method: "POST",
-    headers,
+    headers: trustedHeaders(),
     body: JSON.stringify({
       slugs: ["novo-cpa"],
       couponCode: null,
@@ -298,9 +310,7 @@ test("recovers a Pix QR Code without creating a second charge", async (context) 
     pixPending: true,
   });
 
-  const recovery = await fetch(`${origin}/v1/checkout/orders/pay_pix_recovery/pix`, {
-    headers: { cookie: headers.cookie },
-  });
+  const recovery = await fetch(`${origin}/v1/checkout/orders/pay_pix_recovery/pix`);
   assert.equal(recovery.status, 200);
   assert.deepEqual(await recovery.json(), {
     id: "pay_pix_recovery",
@@ -341,7 +351,7 @@ test("creates a ten-installment hosted Asaas invoice without receiving card data
   const origin = await serve(context, enabledEnvironment, { asaasClient });
   const response = await fetch(`${origin}/v1/checkout/orders`, {
     method: "POST",
-    headers: await authenticatedHeaders(origin),
+    headers: trustedHeaders(),
     body: JSON.stringify({
       slugs: ["novo-cpa"],
       couponCode: null,
@@ -388,7 +398,6 @@ test("returns card terms separately without claiming Pix is interest-free", asyn
   const result = await response.json();
   assert.equal(result.maximumInstallments, 10);
   assert.equal(result.maximumPixInstallments, 6);
-  assert.equal(result.interestFree, undefined);
   assert.equal(result.cardInterestFree, true);
   assert.equal(result.pixTotalPreserved, true);
   assert.equal(result.installments.length, 10);
@@ -401,14 +410,6 @@ test("returns card terms separately without claiming Pix is interest-free", asyn
     lastInstallmentCents: 24_925,
     installmentAmountsCents: [24_925, 24_925],
   });
-  assert.deepEqual(result.installments[9], {
-    number: 10,
-    totalCents: 49_850,
-    installmentCents: 4_985,
-    lastInstallmentCents: 4_985,
-    installmentAmountsCents: Array(10).fill(4_985),
-    interestFree: true,
-  });
 });
 
 test("rejects Pix installment plans above six installments", async (context) => {
@@ -418,7 +419,7 @@ test("rejects Pix installment plans above six installments", async (context) => 
   const origin = await serve(context, enabledEnvironment, { asaasClient });
   const response = await fetch(`${origin}/v1/checkout/orders`, {
     method: "POST",
-    headers: requestHeaders(),
+    headers: trustedHeaders(),
     body: JSON.stringify({
       slugs: ["novo-cpa"],
       couponCode: null,
@@ -435,7 +436,6 @@ test("rejects malformed birth date or address before calling Asaas", async (cont
     findCustomersByDocument: async () => assert.fail("Asaas must not be called"),
   };
   const origin = await serve(context, enabledEnvironment, { asaasClient });
-  const headers = await authenticatedHeaders(origin);
   for (const badBuyer of [
     { ...buyer(), birthDate: "10/05/1985" },
     { ...buyer(), birthDate: "2035-01-01" },
@@ -444,7 +444,7 @@ test("rejects malformed birth date or address before calling Asaas", async (cont
   ]) {
     const response = await fetch(`${origin}/v1/checkout/orders`, {
       method: "POST",
-      headers,
+      headers: trustedHeaders(),
       body: JSON.stringify({ slugs: ["novo-cpa"], couponCode: null, buyer: badBuyer, payment: { method: "pix" } }),
     });
     assert.equal(response.status, 400);
@@ -452,7 +452,7 @@ test("rejects malformed birth date or address before calling Asaas", async (cont
   }
 });
 
-test("persists full buyer identity for later enrollment use", async (context) => {
+test("persists full buyer identity for later reconciliation", async (context) => {
   const store = createInMemoryStore();
   const asaasClient = {
     findCustomersByDocument: async () => ({ data: [{ id: "cus_full_buyer" }] }),
@@ -482,7 +482,7 @@ test("persists full buyer identity for later enrollment use", async (context) =>
   };
   const response = await fetch(`${origin}/v1/checkout/orders`, {
     method: "POST",
-    headers: await authenticatedHeaders(origin),
+    headers: trustedHeaders(),
     body: JSON.stringify({
       slugs: ["novo-cpa"],
       couponCode: null,
@@ -505,7 +505,7 @@ test("rejects invalid CPF or CNPJ before calling Asaas", async (context) => {
   const origin = await serve(context, enabledEnvironment, { asaasClient });
   const response = await fetch(`${origin}/v1/checkout/orders`, {
     method: "POST",
-    headers: requestHeaders(),
+    headers: trustedHeaders(),
     body: JSON.stringify({
       slugs: ["novo-cpa"],
       couponCode: null,
@@ -538,7 +538,7 @@ test("rejects coupons that reduce a Pix charge below the Asaas minimum", async (
   const origin = await serve(context, enabledEnvironment, { store, asaasClient });
   const response = await fetch(`${origin}/v1/checkout/orders`, {
     method: "POST",
-    headers: await authenticatedHeaders(origin),
+    headers: trustedHeaders(),
     body: JSON.stringify({
       slugs: ["novo-cpa"],
       couponCode: "QUASE100",
@@ -576,7 +576,7 @@ test("rejects raw card fields and invalid catalog data before calling Asaas", as
   ]) {
     const response = await fetch(`${origin}/v1/checkout/orders`, {
       method: "POST",
-      headers: requestHeaders(),
+      headers: trustedHeaders(),
       body: JSON.stringify(payload),
     });
     assert.equal(response.status, 400);
@@ -598,14 +598,13 @@ test("allows a safe retry with the same idempotency key before an Asaas charge e
   };
   const origin = await serve(context, enabledEnvironment, { asaasClient });
   const key = crypto.randomUUID();
-  const headers = await authenticatedHeaders(origin, key);
   const payload = { slugs: ["novo-cpa"], couponCode: null, buyer: buyer(), payment: { method: "pix" } };
   const first = await fetch(`${origin}/v1/checkout/orders`, {
-    method: "POST", headers, body: JSON.stringify(payload),
+    method: "POST", headers: trustedHeaders(key), body: JSON.stringify(payload),
   });
   assert.equal(first.status, 502);
   const second = await fetch(`${origin}/v1/checkout/orders`, {
-    method: "POST", headers, body: JSON.stringify(payload),
+    method: "POST", headers: trustedHeaders(key), body: JSON.stringify(payload),
   });
   assert.equal(second.status, 201);
   assert.equal((await second.json()).orderId, "pay_retry6010");

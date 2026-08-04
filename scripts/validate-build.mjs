@@ -1,9 +1,8 @@
 await Promise.all([
   import("../src/application.js"),
-  import("../src/admin/in-memory-store.js"),
-  import("../src/admin/mysql-store.js"),
-  import("../src/admin/security.js"),
-  import("../src/admin/validation.js"),
+  import("../src/store/in-memory-store.js"),
+  import("../src/store/mysql-store.js"),
+  import("../src/store/order-status.js"),
   import("../src/config/environment.js"),
   import("../src/http/error-handler.js"),
   import("../src/http/request-context.js"),
@@ -12,35 +11,27 @@ await Promise.all([
   import("../src/domain/provider-values.js"),
   import("../src/domain/quote.js"),
   import("../src/integrations/asaas/client.js"),
-  import("../src/integrations/art/credentials.js"),
-  import("../src/integrations/art/client.js"),
-  import("../src/integrations/art/enrollment.js"),
-  import("../src/integrations/art/queue.js"),
-  import("../src/integrations/art/index.js"),
   import("../src/services/installment-service.js"),
   import("../src/routes/asaas-integration.js"),
-  import("../src/routes/admin.js"),
   import("../src/routes/checkout.js"),
   import("../src/routes/health.js"),
+  import("../src/routes/public.js"),
 ]);
 
-// The ART course-enrollment connector under src/integrations/art is a sanctioned,
-// operator-owned integration with the operator's own course platform. The validated
-// flow no longer mints any unsigned (alg=none) transport JWT — it runs on a real
-// RS256 login plus the static x-api-key only. This guard keeps alg=none /
-// forgeTransportJwt out of the ENTIRE codebase (art dir included) so the unsigned
-// transport token cannot be reintroduced anywhere.
+// Guard defensivo: mantém fora do código qualquer padrão de token não assinado
+// (alg=none) ou de forja de JWT de transporte, caso código legado seja
+// reintroduzido.
 const forbiddenSource = /\b(?:alg\s*[:=]\s*["']none|forgeTransportJwt)\b/i;
-async function assertNoUnsafeEnrollmentCode(directory) {
+async function assertNoUnsafeCode(directory) {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const target = path.join(directory, entry.name);
-    if (entry.isDirectory()) await assertNoUnsafeEnrollmentCode(target);
+    if (entry.isDirectory()) await assertNoUnsafeCode(target);
     else if (entry.name.endsWith(".js") && forbiddenSource.test(await readFile(target, "utf8"))) {
-      throw new Error(`Unsafe enrollment transport code found in ${target}.`);
+      throw new Error(`Unsafe transport code found in ${target}.`);
     }
   }
 }
-await assertNoUnsafeEnrollmentCode(fileURLToPath(new URL("../src", import.meta.url)));
+await assertNoUnsafeCode(fileURLToPath(new URL("../src", import.meta.url)));
 
 console.log("PULSO API source validated.");
 import { readFile, readdir } from "node:fs/promises";

@@ -19,10 +19,10 @@ const conn = await mysql.createConnection({
 });
 
 try {
-  const [cols] = await conn.query("SHOW COLUMNS FROM products");
-  console.log("colunas da tabela products:", cols.map((c) => c.Field).join(", "));
+  const [cols] = await conn.query("SHOW COLUMNS FROM pulso_products");
+  console.log("colunas da tabela pulso_products:", cols.map((c) => c.Field).join(", "));
 
-  const [rows] = await conn.query("SELECT * FROM products");
+  const [rows] = await conn.query("SELECT * FROM pulso_products");
   console.log(`\ntotal produtos: ${rows.length}`);
 
   const active = rows.filter((p) => p.active !== 0 && p.active !== false);

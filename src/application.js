@@ -3,15 +3,12 @@ import express from "express";
 import helmet from "helmet";
 import { getEnvironment } from "./config/environment.js";
 import { createAsaasClient } from "./integrations/asaas/client.js";
-import { createArtIntegration } from "./integrations/art/index.js";
-import { createCustomerMailer } from "./integrations/email/mailer.js";
 import { createAsaasWebhookHandler } from "./routes/asaas-integration.js";
 import { createCheckoutRouter } from "./routes/checkout.js";
 import { createHealthRouter } from "./routes/health.js";
-import { createAdminRouter, createPublicCommerceRouter } from "./routes/admin.js";
-import { createCustomerRouter } from "./routes/customer.js";
-import { createInMemoryStore } from "./admin/in-memory-store.js";
-import { createMySqlStore } from "./admin/mysql-store.js";
+import { createPublicCommerceRouter } from "./routes/public.js";
+import { createInMemoryStore } from "./store/in-memory-store.js";
+import { createMySqlStore } from "./store/mysql-store.js";
 import { createInstallmentService } from "./services/installment-service.js";
 import { replaceCatalogProducts } from "./domain/catalog.js";
 import { requestContext } from "./http/request-context.js";
@@ -22,29 +19,20 @@ export function createApp(overrides = {}, dependencies = {}) {
   if (environment.nodeEnvironment === "production" && !environment.mysqlUrl) {
     throw new Error("MYSQL_URL is required in production.");
   }
-  if (environment.nodeEnvironment === "production" && !environment.sessionPepper) {
-    throw new Error("SESSION_PEPPER is required in production.");
-  }
   if (environment.nodeEnvironment === "production" && environment.checkoutEnabled && !environment.asaasWebhookToken) {
     throw new Error("ASAAS_WEBHOOK_TOKEN is required when checkout is enabled in production.");
   }
   const asaasClient = dependencies.asaasClient ?? createAsaasClient(environment);
-  const customerMailer = dependencies.customerMailer ?? createCustomerMailer(environment);
   const store = dependencies.store ?? (environment.mysqlUrl ? createMySqlStore(environment.mysqlUrl) : createInMemoryStore());
   const installmentService = dependencies.installmentService
     ?? createInstallmentService({ asaasClient, store });
-  const artIntegration = dependencies.artIntegration ?? createArtIntegration({ environment, store });
-  // Concessão de acesso pós-pagamento. Sem a integração de matrícula ligada
-  // (ENROLLMENT_ENABLED!=true), registra em log cada pedido pago que ficou
-  // pendente de ativação manual em vez de falhar em silêncio.
-  const onAccessGranted = artIntegration
-    ? async (orderId) => {
-        const order = await store.getOrderWithItems(orderId);
-        await artIntegration.queue.enqueueOrder(order);
-      }
-    : async (orderId) => {
-        console.error("PULSO API payment confirmed but automatic enrollment is DISABLED (ENROLLMENT_ENABLED!=true); manual activation required.", { orderId });
-      };
+  // Pagamento confirmado: registra a concessão de acesso. A entrega do curso
+  // acontece na plataforma frontend (LMS em pulso.cyara.com.br); aqui o evento
+  // é apenas auditado em log para fechamento com o financeiro.
+  const onAccessGranted = async (orderId) => {
+    console.log("PULSO API payment confirmed; access granted.", { orderId });
+  };
+
   const app = express();
   const readiness = {
     status: "connecting",
@@ -78,29 +66,18 @@ export function createApp(overrides = {}, dependencies = {}) {
       ready.then(settle, settle);
     });
   };
-  if (artIntegration) {
-    ready.then(() => artIntegration.queue.start()).catch((error) => {
-      console.error("PULSO API enrollment queue failed to start.", { message: error?.message });
-    });
-  }
 
   app.disable("x-powered-by");
   app.set("trust proxy", 1);
   app.use(helmet());
   app.use(requestContext);
   app.use(cors({
-    origin: [environment.publicOrigin, environment.adminOrigin, environment.sitesOrigin],
-    methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Accept", "Idempotency-Key", "X-CSRF-Token", "asaas-access-token"],
-    credentials: true,
+    origin: [environment.publicOrigin],
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Accept", "Idempotency-Key", "asaas-access-token", "x-pulso-trusted-token"],
     maxAge: 86_400,
   }));
   app.use(express.json({ limit: "32kb" }));
-
-  const adminPanelUrl = new URL("/admin/", environment.adminOrigin).toString();
-  app.get(["/admin", "/admin/"], (_request, response) => {
-    response.redirect(308, adminPanelUrl);
-  });
 
   app.use("/health", createHealthRouter(express, environment, readiness, waitForReady));
   app.use(async (_request, response, next) => {
@@ -122,22 +99,15 @@ export function createApp(overrides = {}, dependencies = {}) {
     store,
     onAccessGranted,
   }));
-  app.use("/v1/customer", createCustomerRouter(express, {
-    customerMailer,
-    environment,
-    installmentService,
-    store,
-  }));
-  app.use("/v1/admin", createAdminRouter(express, { environment, store, queue: artIntegration?.queue }));
   app.use("/v1/public", createPublicCommerceRouter(express, { store }));
 
   app.use((_request, response) => {
     response.status(404).json({
       error: "not_found",
-      message: "Esta API está reservada para os serviços do PULSO.",
+      message: "Esta API é reservada aos serviços de pagamento do PULSO.",
     });
   });
   app.use(jsonErrorHandler);
 
-  return { app, environment, asaasClient, customerMailer, installmentService, artIntegration, store, readiness, ready, waitForReady };
+  return { app, environment, asaasClient, installmentService, store, readiness, ready, waitForReady };
 }

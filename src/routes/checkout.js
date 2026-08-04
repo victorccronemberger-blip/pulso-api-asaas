@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import {
   MAX_INTEREST_FREE_INSTALLMENTS,
   MAX_PIX_INSTALLMENTS,
@@ -9,7 +9,6 @@ import {
 } from "../domain/installments.js";
 import { CheckoutValidationError, createAuthoritativeQuote } from "../domain/quote.js";
 import { createFixedWindowLimiter } from "../http/fixed-window-limiter.js";
-import { customerSessionFromRequest } from "../customer/session.js";
 import { normalizeAsaasPaymentStatus } from "../domain/payment-status.js";
 import { providerId, safeAsaasInvoiceUrl } from "../domain/provider-values.js";
 
@@ -19,6 +18,14 @@ class CheckoutInputError extends Error {
     this.name = "CheckoutInputError";
     this.code = code;
   }
+}
+
+// Comparação em tempo constante do token de checkout confiado (chamada
+// servidor-a-servidor do frontend LMS; cabeçalho x-pulso-trusted-token).
+function safeEqual(received, expected) {
+  const left = Buffer.from(String(received ?? ""), "utf8");
+  const right = Buffer.from(String(expected ?? ""), "utf8");
+  return left.length === right.length && left.length > 0 && timingSafeEqual(left, right);
 }
 
 function cleanDigits(value, min, max, label) {
@@ -96,9 +103,7 @@ function cleanBirthDate(value) {
   return date;
 }
 
-// Endereço completo do comprador. Todos opcionais na API (frontends antigos não
-// enviam), mas validados quando presentes — a matrícula os usa para montar o
-// perfil do aluno na plataforma de cursos sem defaults fabricados.
+// Endereço completo do comprador. Opcional na API, mas validado quando presente.
 function cleanAddress(input) {
   if (!input || typeof input !== "object") return null;
   const digits = (value, max) => String(value ?? "").replace(/\D/g, "").slice(0, max) || null;
@@ -192,8 +197,8 @@ async function quoteFromBody(body, store) {
   return createAuthoritativeQuote({ slugs, couponCode }, store ? { coupon } : {});
 }
 
-function checkoutFingerprint(body, customerId) {
-  return createHash("sha256").update(JSON.stringify({ body, customerId })).digest("hex");
+function checkoutFingerprint(body) {
+  return createHash("sha256").update(JSON.stringify(body)).digest("hex");
 }
 
 function idempotencyKey(request) {
@@ -231,7 +236,6 @@ async function findOrCreateCustomer(asaasClient, buyer, key) {
     cpfCnpj: buyer.cpfCnpj,
     email: buyer.email,
     mobilePhone: buyer.mobilePhone,
-    // endereço completo quando coletado: melhora o cadastro do pagador na Asaas
     ...(buyer.address?.street ? {
       address: buyer.address.street,
       addressNumber: buyer.address.number ?? "S/N",
@@ -321,6 +325,26 @@ export function createCheckoutRouter(express, {
     return false;
   }
 
+  // A criação de pedidos é exclusiva do frontend confiável (LMS), chamada
+  // servidor-a-servidor. O token ausente ou divergente bloqueia a rota.
+  function requireTrustedFrontend(request, response) {
+    if (!environment.trustedCheckoutToken) {
+      response.status(503).json({
+        error: "checkout_unavailable",
+        message: "O checkout entre servidores ainda não foi configurado.",
+      });
+      return false;
+    }
+    if (!safeEqual(request.get("x-pulso-trusted-token"), environment.trustedCheckoutToken)) {
+      response.status(401).json({
+        error: "unauthenticated",
+        message: "Token de checkout inválido.",
+      });
+      return false;
+    }
+    return true;
+  }
+
   router.get("/status", (_request, response) => {
     response.json({
       enabled: environment.checkoutEnabled,
@@ -373,40 +397,20 @@ export function createCheckoutRouter(express, {
 
   router.post("/orders", limiter, async (request, response) => {
     if (!requireProvider(response)) return;
+    if (!requireTrustedFrontend(request, response)) return;
 
     let key;
     let quote;
     let buyer;
     let payment;
-    let accountSession;
     try {
       key = idempotencyKey(request);
       quote = await quoteFromBody(request.body, store);
       buyer = parseBuyer(request.body?.buyer, request.ip);
       payment = parsePayment(request.body?.payment);
-      accountSession = await customerSessionFromRequest(
-        request,
-        store,
-        environment.sessionPepper,
-      );
     } catch (error) {
       if (handleInputError(error, response)) return;
       throw error;
-    }
-    if (!accountSession) {
-      response.status(401).json({
-        error: "customer_authentication_required",
-        message: "Entre na sua conta antes de concluir o pagamento.",
-      });
-      return;
-    }
-    if (accountSession.customer.email !== buyer.email) {
-      response.status(400).json({
-        error: "customer_email_mismatch",
-        message: "Use o mesmo e-mail da sua conta no checkout.",
-        retryable: true,
-      });
-      return;
     }
     try {
       validateMinimumCharge(quote.totalCents, payment);
@@ -415,7 +419,7 @@ export function createCheckoutRouter(express, {
       throw error;
     }
 
-    const fingerprint = checkoutFingerprint(request.body, accountSession.customer.id);
+    const fingerprint = checkoutFingerprint(request.body);
     const attempt = await store.beginCheckoutAttempt(key, fingerprint);
     if (attempt.kind === "conflict") {
       response.status(409).json({ error: "idempotency_conflict", message: "Esta tentativa já foi usada com outro pedido.", retryable: true });
@@ -458,11 +462,6 @@ export function createCheckoutRouter(express, {
         throw new CheckoutInputError("O parcelamento escolhido não está disponível.", "invalid_installments");
       }
 
-      await store.updateCustomerProfile(accountSession.customer.id, {
-        displayName: buyer.name,
-        mobilePhone: buyer.mobilePhone,
-        documentLast4: buyer.cpfCnpj.slice(-4),
-      });
       const customerId = await findOrCreateCustomer(asaasClient, buyer, key);
       const providerPayment = await asaasClient.createPayment(paymentPayload({
         customerId,
@@ -503,7 +502,6 @@ export function createCheckoutRouter(express, {
         buyerPhone: buyer.mobilePhone,
         buyerBirthDate: buyer.birthDate,
         buyerAddress: buyer.address,
-        customerId: accountSession.customer.id,
         paymentMethod: payment.method,
         installments: payment.installments,
         installmentCents: installment?.installmentCents ?? quote.totalCents,
@@ -514,15 +512,12 @@ export function createCheckoutRouter(express, {
         lines: quote.lines,
       });
       couponReservationBound = Boolean(quote.coupon);
-      // Rede de segurança: o webhook da Asaas pode ter confirmado o pagamento
-      // ANTES deste createOrder (Pix confirmando em segundos, ou cobrança criada
-      // fora do fluxo). Nessa corrida a order nasceu paga e sem dados do
-      // comprador, e o handler do webhook não conseguiu matricular. Agora que o
-      // pedido foi enriquecido com email/CPF/nome, dispara a concessão de acesso.
-      // A fila de matrícula é idempotente (dedupe por pedido+curso e cliente+curso).
+      // Rede de segurança: o webhook da Asaas pode confirmar o pagamento ANTES
+      // do createOrder (Pix confirmando em segundos). Se a ordem já nasceu paga,
+      // dispara a concessão de acesso aqui, com o pedido já enriquecido.
       if (localOrder.status === "paid" && onAccessGranted) {
         onAccessGranted(localOrder.id).catch((error) => {
-          console.error("Could not enqueue enrollment for reconciled checkout order", {
+          console.error("Could not grant access for reconciled checkout order", {
             orderId: localOrder.id,
             type: error?.name,
           });
@@ -620,32 +615,18 @@ export function createCheckoutRouter(express, {
     response.status(result.status).json(result.body);
   });
 
+  // Recuperação do QR Code Pix sem criar uma segunda cobrança (o id do pedido
+  // na Asaas é imprevisível, então a rota é aberta com rate limit).
   router.get("/orders/:orderId/pix", limiter, async (request, response) => {
     if (!requireProvider(response)) return;
     response.set("Cache-Control", "no-store");
     try {
       const orderId = providerId(request.params.orderId);
-      const accountSession = await customerSessionFromRequest(
-        request,
-        store,
-        environment.sessionPepper,
-      );
-      if (!accountSession) {
-        response.status(401).json({
-          error: "customer_authentication_required",
-          message: "Entre na sua conta para abrir o Pix.",
-        });
-        return;
-      }
-      const localOrder = await store.getCustomerOrderByProviderOrderId(
-        accountSession.customer.id,
-        "asaas",
-        orderId,
-      );
+      const localOrder = await store.getOrderByProviderOrderId("asaas", orderId);
       if (!localOrder || !["pix", "pix_installment"].includes(localOrder.paymentMethod)) {
         response.status(404).json({
           error: "order_not_found",
-          message: "Não encontramos este Pix na sua conta.",
+          message: "Não encontramos este Pix.",
         });
         return;
       }
@@ -677,6 +658,8 @@ export function createCheckoutRouter(express, {
     }
   });
 
+  // Consulta de status sanitizada (usada pelo frontend para confirmar o
+  // pagamento após o redirecionamento da Asaas).
   router.get("/orders/:orderId", limiter, async (request, response) => {
     if (!requireProvider(response)) return;
     let orderId;
