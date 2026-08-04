@@ -22,6 +22,17 @@ function parseList(value, fallback = []) {
   return source.split(",").map((item) => item.trim()).filter(Boolean);
 }
 
+function parseBunnyLearningConfig(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    throw new Error("BUNNY_LEARNING_CONFIG must be valid JSON.");
+  }
+}
+
 // Contas de serviço da plataforma ART (formato "email:senha,email2:senha2").
 // São a fonte PRIMÁRIA de descoberta dinâmica de turmas: login dedicado →
 // RS256 → listagem real de /v1/services/turmas em tempo real. Use contas que
@@ -74,6 +85,7 @@ export function getEnvironment(source = process.env) {
 
   const enrollmentEnabled = parseBoolean(source.ENROLLMENT_ENABLED ?? "false");
   const artTlsRejectUnauthorized = parseTlsRejectUnauthorized(source.ART_TLS_REJECT_UNAUTHORIZED ?? "1");
+  const bunny = parseBunnyLearningConfig(source.BUNNY_LEARNING_CONFIG);
 
   return Object.freeze({
     nodeEnvironment: source.NODE_ENV?.trim().toLowerCase() || "development",
@@ -112,16 +124,16 @@ export function getEnvironment(source = process.env) {
     artMaxRetries: parsePositiveInteger(source.ART_MAX_RETRIES, 3, "ART_MAX_RETRIES"),
     artRetryDelayMs: parsePositiveInteger(source.ART_RETRY_DELAY_MS, 15_000, "ART_RETRY_DELAY_MS"),
     artTlsRejectUnauthorized,
-    bunnyStreamLibraryId: source.BUNNY_STREAM_LIBRARY_ID?.trim() || null,
-    bunnyStreamTokenKey: source.BUNNY_STREAM_TOKEN_KEY?.trim() || null,
-    bunnyStreamEmbedOrigin: source.BUNNY_STREAM_EMBED_ORIGIN?.trim() || "https://iframe.mediadelivery.net",
+    bunnyStreamLibraryId: source.BUNNY_STREAM_LIBRARY_ID?.trim() || String(bunny.streamLibraryId ?? "").trim() || null,
+    bunnyStreamTokenKey: source.BUNNY_STREAM_TOKEN_KEY?.trim() || String(bunny.streamTokenKey ?? "").trim() || null,
+    bunnyStreamEmbedOrigin: source.BUNNY_STREAM_EMBED_ORIGIN?.trim() || String(bunny.streamEmbedOrigin ?? "").trim() || "https://iframe.mediadelivery.net",
     bunnyPlaybackTokenTtlSeconds: parsePositiveInteger(
       source.BUNNY_PLAYBACK_TOKEN_TTL_SECONDS,
       300,
       "BUNNY_PLAYBACK_TOKEN_TTL_SECONDS",
     ),
-    bunnyStorageZone: source.BUNNY_STORAGE_ZONE?.trim() || null,
-    bunnyStorageAccessKey: source.BUNNY_STORAGE_ACCESS_KEY?.trim() || null,
-    bunnyStorageApiOrigin: source.BUNNY_STORAGE_API_ORIGIN?.trim() || "https://storage.bunnycdn.com",
+    bunnyStorageZone: source.BUNNY_STORAGE_ZONE?.trim() || String(bunny.storageZone ?? "").trim() || null,
+    bunnyStorageAccessKey: source.BUNNY_STORAGE_ACCESS_KEY?.trim() || String(bunny.storageAccessKey ?? "").trim() || null,
+    bunnyStorageApiOrigin: source.BUNNY_STORAGE_API_ORIGIN?.trim() || String(bunny.storageApiOrigin ?? "").trim() || "https://storage.bunnycdn.com",
   });
 }
