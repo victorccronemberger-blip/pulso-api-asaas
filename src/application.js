@@ -34,6 +34,10 @@ export function createApp(overrides = {}, dependencies = {}) {
   };
 
   const app = express();
+  const allowedOrigins = [...new Set([
+    environment.publicOrigin,
+    "https://academy.cyara.com.br",
+  ])];
   const readiness = {
     status: "connecting",
     error: null,
@@ -72,7 +76,7 @@ export function createApp(overrides = {}, dependencies = {}) {
   app.use(helmet());
   app.use(requestContext);
   app.use(cors({
-    origin: [environment.publicOrigin],
+    origin: allowedOrigins,
     methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Accept", "Idempotency-Key", "asaas-access-token", "x-pulso-trusted-token"],
     maxAge: 86_400,
